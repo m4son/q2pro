@@ -223,6 +223,7 @@ typedef struct client_state_s {
 
     refdef_t    refdef;
     float       fov_x;      // interpolated
+    float       fov_y;      // derived from fov_x assuming 4/3 aspect ratio
     int         lightlevel;
 
     vec3_t      v_forward, v_right, v_up;    // set when refdef.angles is set
@@ -236,12 +237,13 @@ typedef struct client_state_s {
     //
     // transient data from server
     //
-    char        layout[MAX_STRING_CHARS];        // general 2D overlay
+    char        layout[MAX_NET_STRING];     // general 2D overlay
     int         inventory[MAX_ITEMS];
 
     //
     // server state information
     //
+    int         serverstate;    // ss_* constants
     int         servercount;    // server identification for prespawns
     char        gamedir[MAX_QPATH];
     int         clientNum;            // never changed during gameplay, set by serverdata packet
@@ -306,7 +308,8 @@ typedef enum {
     ca_connected,       // netchan_t established, waiting for svc_serverdata
     ca_loading,         // loading level data
     ca_precached,       // loaded level data, waiting for svc_frame
-    ca_active           // game views should be displayed
+    ca_active,          // game views should be displayed
+    ca_cinematic        // running a cinematic
 } connstate_t;
 
 #define FOR_EACH_DLQ(q) \
@@ -407,8 +410,12 @@ typedef struct client_static_s {
         int         pending;            // number of non-finished entries in queue
         dlqueue_t   *current;           // path being downloaded
         int         percent;            // how much downloaded
+        int         position;           // how much downloaded (in bytes)
         qhandle_t   file;               // UDP file transfer from server
         char        temp[MAX_QPATH + 4];// account 4 bytes for .tmp suffix
+#if USE_ZLIB
+        z_stream    z;                  // UDP download zlib stream
+#endif
         string_entry_t  *ignores;       // list of ignored paths
     } download;
 
@@ -431,7 +438,22 @@ typedef struct client_static_s {
         list_t      snapshots;
         qboolean    paused;
         qboolean    seeking;
+        qboolean    eof;
     } demo;
+
+#if USE_CLIENT_GTV
+    struct {
+        connstate_t     state;
+
+        netstream_t     stream;
+        size_t          msglen;
+
+        player_packed_t     ps;
+        entity_packed_t     entities[MAX_EDICTS];
+
+        sizebuf_t       message;
+    } gtv;
+#endif
 } client_static_t;
 
 extern client_static_t    cls;
@@ -526,6 +548,7 @@ extern cvar_t    *info_uf;
 void CL_Init(void);
 void CL_Quit_f(void);
 void CL_Disconnect(error_type_t type);
+void CL_UpdateRecordingSetting(void);
 void CL_Begin(void);
 void CL_CheckForResend(void);
 void CL_ClearState(void);
@@ -544,12 +567,12 @@ qboolean CL_CheckForIgnore(const char *s);
 //
 
 typedef enum {
+    LOAD_NONE,
     LOAD_MAP,
     LOAD_MODELS,
     LOAD_IMAGES,
     LOAD_CLIENTS,
-    LOAD_SOUNDS,
-    LOAD_FINISH
+    LOAD_SOUNDS
 } load_state_t;
 
 void CL_ParsePlayerSkin(char *name, char *model, char *skin, const char *s);
@@ -570,7 +593,7 @@ qboolean CL_IgnoreDownload(const char *path);
 void CL_FinishDownload(dlqueue_t *q);
 void CL_CleanupDownloads(void);
 void CL_LoadDownloadIgnores(void);
-void CL_HandleDownload(const byte *data, int size, int percent);
+void CL_HandleDownload(byte *data, int size, int percent, int compressed);
 qboolean CL_CheckDownloadExtension(const char *ext);
 void CL_StartNextDownload(void);
 void CL_RequestNextDownload(void);
@@ -666,9 +689,7 @@ void V_AddLight(vec3_t org, float intensity, float r, float g, float b);
 #else
 #define V_AddLight(org, intensity, r, g, b)
 #endif
-#if USE_LIGHTSTYLES
 void V_AddLightStyle(int style, vec4_t value);
-#endif
 void CL_UpdateBlendSetting(void);
 
 
@@ -676,7 +697,6 @@ void CL_UpdateBlendSetting(void);
 // tent.c
 //
 
-//ROGUE
 typedef struct cl_sustain_s {
     int     id;
     int     type;
@@ -714,10 +734,7 @@ void CL_CheckPredictionError(void);
 //
 #define PARTICLE_GRAVITY        40
 #define BLASTER_PARTICLE_COLOR  0xe0
-// PMM
 #define INSTANT_PARTICLE    -10000.0
-// PGM
-// ========
 
 typedef struct cparticle_s {
     struct cparticle_s    *next;
@@ -757,7 +774,6 @@ void CL_BlasterParticles(vec3_t org, vec3_t dir);
 void CL_ExplosionParticles(vec3_t org);
 void CL_BFGExplosionParticles(vec3_t org);
 void CL_BlasterTrail(vec3_t start, vec3_t end);
-void CL_QuadTrail(vec3_t start, vec3_t end);
 void CL_OldRailTrail(void);
 void CL_BubbleTrail(vec3_t start, vec3_t end);
 void CL_FlagTrail(vec3_t start, vec3_t end, int color);
@@ -775,34 +791,26 @@ cdlight_t *CL_AllocDlight(int key);
 void CL_RunDLights(void);
 void CL_AddDLights(void);
 #endif
-#if USE_LIGHTSTYLES
 void CL_ClearLightStyles(void);
 void CL_SetLightStyle(int index, const char *s);
 void CL_RunLightStyles(void);
 void CL_AddLightStyles(void);
-#endif
-void MakeNormalVectors(vec3_t forward, vec3_t right, vec3_t up);
 
 //
 // newfx.c
 //
 
-// ========
-// PGM
 void CL_BlasterParticles2(vec3_t org, vec3_t dir, unsigned int color);
 void CL_BlasterTrail2(vec3_t start, vec3_t end);
 void CL_DebugTrail(vec3_t start, vec3_t end);
-void CL_SmokeTrail(vec3_t start, vec3_t end, int colorStart, int colorRun, int spacing);
 #if USE_DLIGHTS
 void CL_Flashlight(int ent, vec3_t pos);
 #endif
 void CL_ForceWall(vec3_t start, vec3_t end, int color);
-void CL_GenericParticleEffect(vec3_t org, vec3_t dir, int color, int count, int numcolors, int dirspread, float alphavel);
 void CL_BubbleTrail2(vec3_t start, vec3_t end, int dist);
 void CL_Heatbeam(vec3_t start, vec3_t end);
 void CL_ParticleSteamEffect(vec3_t org, vec3_t dir, int color, int count, int magnitude);
 void CL_TrackerTrail(vec3_t start, vec3_t end, int particleColor);
-void CL_Tracker_Explode(vec3_t origin);
 void CL_TagTrail(vec3_t start, vec3_t end, int color);
 #if USE_DLIGHTS
 void CL_ColorFlash(vec3_t pos, int ent, int intensity, float r, float g, float b);
@@ -814,15 +822,9 @@ void CL_ParticleSmokeEffect(vec3_t org, vec3_t dir, int color, int count, int ma
 void CL_Widowbeamout(cl_sustain_t *self);
 void CL_Nukeblast(cl_sustain_t *self);
 void CL_WidowSplash(void);
-// PGM
-// ========
-
-// RAFAEL
 void CL_IonripperTrail(vec3_t start, vec3_t end);
 void CL_TrapParticles(entity_t *ent);
 void CL_ParticleEffect3(vec3_t org, vec3_t dir, int color, int count);
-// RAFAEL
-
 void CL_ParticleSteamEffect2(cl_sustain_t *self);
 
 
@@ -863,9 +865,10 @@ void Con_ClearNotify_f(void);
 void Con_ToggleConsole_f(void);
 void Con_ClearTyping(void);
 void Con_Close(qboolean force);
-void Con_Popup(void);
+void Con_Popup(qboolean force);
 void Con_SkipNotify(qboolean skip);
 void Con_RegisterMedia(void);
+void Con_CheckResize(void);
 
 void Key_Console(int key);
 void Key_Message(int key);
@@ -892,6 +895,8 @@ void    SCR_UpdateScreen(void);
 void    SCR_SizeUp(void);
 void    SCR_SizeDown(void);
 void    SCR_CenterPrint(const char *str);
+void    SCR_FinishCinematic(void);
+void    SCR_PlayCinematic(const char *name);
 void    SCR_BeginLoadingPlaque(void);
 void    SCR_EndLoadingPlaque(void);
 void    SCR_DebugGraph(float value, int color);
@@ -905,6 +910,9 @@ void    SCR_SetCrosshairColor(void);
 float   SCR_FadeAlpha(unsigned startTime, unsigned visTime, unsigned fadeTime);
 int     SCR_DrawStringEx(int x, int y, int flags, size_t maxlen, const char *s, qhandle_t font);
 void    SCR_DrawStringMulti(int x, int y, int flags, size_t maxlen, const char *s, qhandle_t font);
+
+void    SCR_ClearChatHUD_f(void);
+void    SCR_AddToChatHUD(const char *text);
 
 #ifdef _DEBUG
 void CL_AddNetgraph(void);
@@ -936,6 +944,29 @@ void HTTP_CleanupDownloads(void);
 #define HTTP_CleanupDownloads()         (void)0
 #endif
 
+//
+// gtv.c
+//
+
+#if USE_CLIENT_GTV
+void CL_GTV_EmitFrame(void);
+void CL_GTV_WriteMessage(byte *data, size_t len);
+void CL_GTV_Resume(void);
+void CL_GTV_Suspend(void);
+void CL_GTV_Transmit(void);
+void CL_GTV_Run(void);
+void CL_GTV_Init(void);
+void CL_GTV_Shutdown(void);
+#else
+#define CL_GTV_EmitFrame()              (void)0
+#define CL_GTV_WriteMessage(data, len)  (void)0
+#define CL_GTV_Resume()                 (void)0
+#define CL_GTV_Suspend()                (void)0
+#define CL_GTV_Transmit()               (void)0
+#define CL_GTV_Run()                    (void)0
+#define CL_GTV_Init()                   (void)0
+#define CL_GTV_Shutdown()               (void)0
+#endif
 
 //
 // crc.c

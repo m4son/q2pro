@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "ui.h"
+#include "server/server.h"
 
 /*
 ===================================================================
@@ -29,6 +30,7 @@ ACTION CONTROL
 static void Action_Free(menuAction_t *a)
 {
     Z_Free(a->generic.name);
+    Z_Free(a->generic.status);
     Z_Free(a->cmd);
     Z_Free(a);
 }
@@ -77,7 +79,13 @@ static void Action_Draw(menuAction_t *a)
         }
     }
 
+    if (a->generic.flags & QMF_GRAYED) {
+        R_SetColor(uis.color.disabled.u32);
+    }
     UI_DrawString(a->generic.x, a->generic.y, flags, a->generic.name);
+    if (a->generic.flags & QMF_GRAYED) {
+        R_ClearColor();
+    }
 }
 
 /*
@@ -136,6 +144,7 @@ BITMAP CONTROL
 
 static void Bitmap_Free(menuBitmap_t *b)
 {
+    Z_Free(b->generic.status);
     Z_Free(b->cmd);
     Z_Free(b);
 }
@@ -170,7 +179,9 @@ KEYBIND CONTROL
 static void Keybind_Free(menuKeybind_t *k)
 {
     Z_Free(k->generic.name);
+    Z_Free(k->generic.status);
     Z_Free(k->cmd);
+    Z_Free(k->altstatus);
     Z_Free(k);
 }
 
@@ -181,6 +192,8 @@ Keybind_Init
 */
 static void Keybind_Init(menuKeybind_t *k)
 {
+    size_t len;
+
     if (!k->generic.name) {
         Com_Error(ERR_FATAL, "Keybind_Init: NULL k->generic.name");
     }
@@ -193,8 +206,15 @@ static void Keybind_Init(menuKeybind_t *k)
     UI_StringDimensions(&k->generic.rect,
                         k->generic.uiFlags | UI_RIGHT, k->generic.name);
 
-    k->generic.rect.width += (RCOLUMN_OFFSET - LCOLUMN_OFFSET) +
-                             strlen(k->binding) * CHAR_WIDTH;
+    if (k->altbinding[0]) {
+        len = strlen(k->binding) + 4 + strlen(k->altbinding);
+    } else if (k->binding[0]) {
+        len = strlen(k->binding);
+    } else {
+        len = 3;
+    }
+
+    k->generic.rect.width += (RCOLUMN_OFFSET - LCOLUMN_OFFSET) + len * CHAR_WIDTH;
 }
 
 /*
@@ -268,6 +288,7 @@ static void Keybind_Update(menuFrameWork_t *menu)
         k = menu->items[i];
         if (k->generic.type == MTYPE_KEYBIND) {
             Keybind_Push(k);
+            Keybind_Init(k);
         }
     }
 }
@@ -307,7 +328,7 @@ static qboolean keybind_cb(void *arg, int key)
     Keybind_Update(menu);
 
     menu->keywait = qfalse;
-    menu->status = "Press Enter to change, Backspace to clear";
+    menu->status = k->generic.status;
     Key_WaitKey(NULL, NULL);
 
     UI_StartSound(QMS_OUT);
@@ -319,7 +340,7 @@ static menuSound_t Keybind_DoEnter(menuKeybind_t *k)
     menuFrameWork_t *menu = k->generic.parent;
 
     menu->keywait = qtrue;
-    menu->status = "Press the desired key, Escape to cancel";
+    menu->status = k->altstatus;
     Key_WaitKey(keybind_cb, k);
     return QMS_IN;
 }
@@ -427,6 +448,15 @@ static void Field_Draw(menuField_t *f)
     }
 }
 
+static qboolean Field_TestKey(menuField_t *f, int key)
+{
+    if (f->generic.flags & QMF_NUMBERSONLY) {
+        return Q_isdigit(key) || key == '+' || key == '-' || key == '.';
+    }
+
+    return Q_isprint(key);
+}
+
 /*
 =================
 Field_Key
@@ -434,21 +464,14 @@ Field_Key
 */
 static int Field_Key(menuField_t *f, int key)
 {
-    qboolean ret;
-
-    ret = IF_KeyEvent(&f->field, key);
-    if (ret) {
+    if (IF_KeyEvent(&f->field, key)) {
         return QMS_SILENT;
     }
-    if (f->generic.flags & QMF_NUMBERSONLY) {
-        if (Q_isdigit(key)) {
-            return QMS_SILENT;
-        }
-    } else {
-        if (key >= 32 && key < 127) {
-            return QMS_SILENT;
-        }
+
+    if (Field_TestKey(f, key)) {
+        return QMS_SILENT;
     }
+
     return QMS_NOTHANDLED;
 }
 
@@ -459,12 +482,10 @@ Field_Char
 */
 static int Field_Char(menuField_t *f, int key)
 {
-    int ret;
+    qboolean ret;
 
-    if (f->generic.flags & QMF_NUMBERSONLY) {
-        if (key < '0' || key > '9') {
-            return QMS_BEEP;
-        }
+    if (!Field_TestKey(f, key)) {
+        return QMS_BEEP;
     }
 
     ret = IF_CharEvent(&f->field, key);
@@ -486,13 +507,17 @@ SPIN CONTROL
 static void SpinControl_Push(menuSpinControl_t *s)
 {
     int val = s->cvar->integer;
-    clamp(val, 0, s->numItems - 1);
-    s->curvalue = val;
+
+    if (val < 0 || val >= s->numItems)
+        s->curvalue = -1;
+    else
+        s->curvalue = val;
 }
 
 static void SpinControl_Pop(menuSpinControl_t *s)
 {
-    Cvar_SetInteger(s->cvar, s->curvalue, FROM_MENU);
+    if (s->curvalue >= 0 && s->curvalue < s->numItems)
+        Cvar_SetInteger(s->cvar, s->curvalue, FROM_MENU);
 }
 
 static void SpinControl_Free(menuSpinControl_t *s)
@@ -500,6 +525,7 @@ static void SpinControl_Free(menuSpinControl_t *s)
     int i;
 
     Z_Free(s->generic.name);
+    Z_Free(s->generic.status);
     for (i = 0; i < s->numItems; i++) {
         Z_Free(s->itemnames[i]);
     }
@@ -550,6 +576,9 @@ SpinControl_DoEnter
 */
 static int SpinControl_DoEnter(menuSpinControl_t *s)
 {
+    if (!s->numItems)
+        return QMS_BEEP;
+
     s->curvalue++;
 
     if (s->curvalue >= s->numItems)
@@ -569,6 +598,9 @@ SpinControl_DoSlide
 */
 static int SpinControl_DoSlide(menuSpinControl_t *s, int dir)
 {
+    if (!s->numItems)
+        return QMS_BEEP;
+
     s->curvalue += dir;
 
     if (s->curvalue < 0) {
@@ -591,6 +623,8 @@ SpinControl_Draw
 */
 static void SpinControl_Draw(menuSpinControl_t *s)
 {
+    char *name;
+
     UI_DrawString(s->generic.x + LCOLUMN_OFFSET, s->generic.y,
                   s->generic.uiFlags | UI_RIGHT | UI_ALTCOLOR, s->generic.name);
 
@@ -601,8 +635,13 @@ static void SpinControl_Draw(menuSpinControl_t *s)
         }
     }
 
+    if (s->curvalue < 0 || s->curvalue >= s->numItems)
+        name = "???";
+    else
+        name = s->itemnames[s->curvalue];
+
     UI_DrawString(s->generic.x + RCOLUMN_OFFSET, s->generic.y,
-                  s->generic.uiFlags, s->itemnames[s->curvalue]);
+                  s->generic.uiFlags, name);
 }
 
 /*
@@ -637,6 +676,7 @@ static void BitField_Pop(menuSpinControl_t *s)
 static void BitField_Free(menuSpinControl_t *s)
 {
     Z_Free(s->generic.name);
+    Z_Free(s->generic.status);
     Z_Free(s);
 }
 
@@ -655,14 +695,17 @@ static void Pairs_Push(menuSpinControl_t *s)
     for (i = 0; i < s->numItems; i++) {
         if (!Q_stricmp(s->itemvalues[i], s->cvar->string)) {
             s->curvalue = i;
-            break;
+            return;
         }
     }
+
+    s->curvalue = -1;
 }
 
 static void Pairs_Pop(menuSpinControl_t *s)
 {
-    Cvar_SetByVar(s->cvar, s->itemvalues[s->curvalue], FROM_MENU);
+    if (s->curvalue >= 0 && s->curvalue < s->numItems)
+        Cvar_SetByVar(s->cvar, s->itemvalues[s->curvalue], FROM_MENU);
 }
 
 static void Pairs_Free(menuSpinControl_t *s)
@@ -670,6 +713,7 @@ static void Pairs_Free(menuSpinControl_t *s)
     int i;
 
     Z_Free(s->generic.name);
+    Z_Free(s->generic.status);
     for (i = 0; i < s->numItems; i++) {
         Z_Free(s->itemnames[i]);
         Z_Free(s->itemvalues[i]);
@@ -694,14 +738,17 @@ static void Strings_Push(menuSpinControl_t *s)
     for (i = 0; i < s->numItems; i++) {
         if (!Q_stricmp(s->itemnames[i], s->cvar->string)) {
             s->curvalue = i;
-            break;
+            return;
         }
     }
+
+    s->curvalue = -1;
 }
 
 static void Strings_Pop(menuSpinControl_t *s)
 {
-    Cvar_SetByVar(s->cvar, s->itemnames[s->curvalue], FROM_MENU);
+    if (s->curvalue >= 0 && s->curvalue < s->numItems)
+        Cvar_SetByVar(s->cvar, s->itemnames[s->curvalue], FROM_MENU);
 }
 
 /*
@@ -714,7 +761,18 @@ TOGGLE CONTROL
 
 static void Toggle_Push(menuSpinControl_t *s)
 {
-    s->curvalue = (s->cvar->integer ? 1 : 0) ^ s->negate;
+    int val = s->cvar->integer;
+
+    if (val == 0 || val == 1)
+        s->curvalue = val ^ s->negate;
+    else
+        s->curvalue = -1;
+}
+
+static void Toggle_Pop(menuSpinControl_t *s)
+{
+    if (s->curvalue == 0 || s->curvalue == 1)
+        Cvar_SetInteger(s->cvar, s->curvalue ^ s->negate, FROM_MENU);
 }
 
 /*
@@ -800,7 +858,10 @@ MenuList_SetValue
 */
 void MenuList_SetValue(menuList_t *l, int value)
 {
-    clamp(value, 0, l->numItems - 1);
+    if (value > l->numItems - 1)
+        value = l->numItems - 1;
+    if (value < 0)
+        value = 0;
 
     if (value != l->curvalue) {
         l->curvalue = value;
@@ -916,7 +977,7 @@ static menuSound_t MenuList_Click(menuList_t *l)
         int x = l->generic.rect.x + l->generic.rect.width - MLIST_SCROLLBAR_WIDTH;
         int y = l->generic.rect.y + MLIST_SPACING;
         int h = l->generic.height;
-        int barHeight;
+        int barHeight, pageHeight, prestepHeight;
         float pageFrac, prestepFrac;
 
         if (l->mlFlags & MLF_HEADER) {
@@ -928,24 +989,52 @@ static menuSound_t MenuList_Click(menuList_t *l)
         pageFrac = (float)l->maxItems / l->numItems;
         prestepFrac = (float)l->prestep / l->numItems;
 
+        pageHeight = Q_rint(barHeight * pageFrac);
+        prestepHeight = Q_rint(barHeight * prestepFrac);
+
         // click above thumb
         rect.x = x;
         rect.y = y;
         rect.width = MLIST_SCROLLBAR_WIDTH;
-        rect.height = Q_rint(barHeight * prestepFrac);
+        rect.height = prestepHeight;
         if (UI_CursorInRect(&rect)) {
             l->prestep -= l->maxItems;
             MenuList_ValidatePrestep(l);
             return QMS_MOVE;
         }
 
-        h = rect.height + Q_rint(barHeight * pageFrac);
+        // click on thumb
+        rect.y = y + prestepHeight;
+        rect.height = pageHeight;
+        if (UI_CursorInRect(&rect)) {
+            l->drag_y = uis.mouseCoords[1] - rect.y;
+            uis.mouseTracker = &l->generic;
+            return QMS_SILENT;
+        }
 
         // click below thumb
-        rect.y = y + h;
-        rect.height = barHeight - h;
+        rect.y = y + prestepHeight + pageHeight;
+        rect.height = barHeight - prestepHeight - pageHeight;
         if (UI_CursorInRect(&rect)) {
             l->prestep += l->maxItems;
+            MenuList_ValidatePrestep(l);
+            return QMS_MOVE;
+        }
+
+        // click above scrollbar
+        rect.y = y - MLIST_SPACING;
+        rect.height = MLIST_SPACING;
+        if (UI_CursorInRect(&rect)) {
+            l->prestep--;
+            MenuList_ValidatePrestep(l);
+            return QMS_MOVE;
+        }
+
+        // click below scrollbar
+        rect.y = l->generic.rect.y + l->generic.height - MLIST_SPACING;
+        rect.height = MLIST_SPACING;
+        if (UI_CursorInRect(&rect)) {
+            l->prestep++;
             MenuList_ValidatePrestep(l);
             return QMS_MOVE;
         }
@@ -1107,6 +1196,9 @@ static menuSound_t MenuList_Key(menuList_t *l, int key)
 
     case K_END:
     case K_KP_END:
+        if (!l->numItems) {
+            goto home;
+        }
         if (l->numItems > l->maxItems) {
             l->prestep = l->numItems - l->maxItems;
         }
@@ -1171,12 +1263,36 @@ static menuSound_t MenuList_Key(menuList_t *l, int key)
         return QMS_BEEP;
 
     case K_MOUSE1:
-    case K_MOUSE2:
+    //case K_MOUSE2:
     //case K_MOUSE3:
         return MenuList_Click(l);
     }
 
     return QMS_NOTHANDLED;
+}
+
+static menuSound_t MenuList_MouseMove(menuList_t *l)
+{
+    int y, h, barHeight;
+
+    if (uis.mouseTracker != &l->generic)
+        return QMS_NOTHANDLED;
+
+    y = l->generic.y + MLIST_SPACING;
+    h = l->generic.height;
+
+    if (l->mlFlags & MLF_HEADER) {
+        y += MLIST_SPACING;
+        h -= MLIST_SPACING;
+    }
+
+    barHeight = h - MLIST_SPACING * 2;
+    if (barHeight > 0) {
+        l->prestep = (uis.mouseCoords[1] - y - l->drag_y) * l->numItems / barHeight;
+        MenuList_ValidatePrestep(l);
+    }
+
+    return QMS_SILENT;
 }
 
 /*
@@ -1192,8 +1308,8 @@ static void MenuList_DrawString(int x, int y, int flags,
 
     rc.left = x;
     rc.right = x + column->width - 1;
-    rc.top = 0;
-    rc.bottom = 0;
+    rc.top = y + 1;
+    rc.bottom = y + CHAR_HEIGHT + 1;
 
     if ((column->uiFlags & UI_CENTER) == UI_CENTER) {
         x += column->width / 2 - 1;
@@ -1203,13 +1319,9 @@ static void MenuList_DrawString(int x, int y, int flags,
         x += MLIST_PRESTEP;
     }
 
-    R_SetClipRect(DRAW_CLIP_RIGHT | DRAW_CLIP_LEFT, &rc);
+    R_SetClipRect(&rc);
     UI_DrawString(x, y + 1, column->uiFlags | flags, string);
-#if USE_REF == REF_SOFT
-    R_SetClipRect(DRAW_CLIP_MASK, &uis.clipRect);
-#else
-    R_SetClipRect(DRAW_CLIP_DISABLED, NULL);
-#endif
+    R_SetClipRect(NULL);
 }
 
 /*
@@ -1324,6 +1436,10 @@ static void MenuList_Draw(menuList_t *l)
 
         // draw contents
         s = (char *)l->items[i] + l->extrasize;
+        if (l->mlFlags & MLF_COLOR) {
+            R_SetColor(*((uint32_t *)(s - 4)));
+        }
+
         xx = x;
         for (j = 0; j < l->numcolumns; j++) {
             if (!*s) {
@@ -1338,6 +1454,10 @@ static void MenuList_Draw(menuList_t *l)
         }
 
         yy += MLIST_SPACING;
+    }
+
+    if (l->mlFlags & MLF_COLOR) {
+        R_SetColor(U32_WHITE);
     }
 }
 
@@ -1381,20 +1501,27 @@ SLIDER CONTROL
 ===================================================================
 */
 
+static menuSound_t Slider_DoSlide(menuSlider_t *s, int dir);
+
 static void Slider_Push(menuSlider_t *s)
 {
+    s->modified = qfalse;
     s->curvalue = s->cvar->value;
     cclamp(s->curvalue, s->minvalue, s->maxvalue);
 }
 
 static void Slider_Pop(menuSlider_t *s)
 {
-    Cvar_SetValue(s->cvar, s->curvalue, FROM_MENU);
+    if (s->modified) {
+        cclamp(s->curvalue, s->minvalue, s->maxvalue);
+        Cvar_SetValue(s->cvar, s->curvalue, FROM_MENU);
+    }
 }
 
 static void Slider_Free(menuSlider_t *s)
 {
     Z_Free(s->generic.name);
+    Z_Free(s->generic.status);
     Z_Free(s);
 }
 
@@ -1410,15 +1537,78 @@ static void Slider_Init(menuSlider_t *s)
     s->generic.rect.height = CHAR_HEIGHT;
 }
 
-static int Slider_Key(menuSlider_t *s, int key)
+static menuSound_t Slider_Click(menuSlider_t *s)
+{
+    vrect_t rect;
+    float   pos;
+    int     x;
+
+    pos = (s->curvalue - s->minvalue) / (s->maxvalue - s->minvalue);
+    clamp(pos, 0, 1);
+
+    x = CHAR_WIDTH + (SLIDER_RANGE - 1) * CHAR_WIDTH * pos;
+
+    // click left of thumb
+    rect.x = s->generic.x + RCOLUMN_OFFSET;
+    rect.y = s->generic.y;
+    rect.width = x;
+    rect.height = CHAR_HEIGHT;
+    if (UI_CursorInRect(&rect))
+        return Slider_DoSlide(s, -1);
+
+    // click on thumb
+    rect.x = s->generic.x + RCOLUMN_OFFSET + x;
+    rect.y = s->generic.y;
+    rect.width = CHAR_WIDTH;
+    rect.height = CHAR_HEIGHT;
+    if (UI_CursorInRect(&rect)) {
+        uis.mouseTracker = &s->generic;
+        return QMS_SILENT;
+    }
+
+    // click right of thumb
+    rect.x = s->generic.x + RCOLUMN_OFFSET + x + CHAR_WIDTH;
+    rect.y = s->generic.y;
+    rect.width = (SLIDER_RANGE + 1) * CHAR_WIDTH - x;
+    rect.height = CHAR_HEIGHT;
+    if (UI_CursorInRect(&rect))
+        return Slider_DoSlide(s, 1);
+
+    return QMS_SILENT;
+}
+
+static menuSound_t Slider_MouseMove(menuSlider_t *s)
+{
+    float   pos, value;
+    int     steps;
+
+    if (uis.mouseTracker != &s->generic)
+        return QMS_NOTHANDLED;
+
+    pos = (uis.mouseCoords[0] - (s->generic.x + RCOLUMN_OFFSET + CHAR_WIDTH)) * (1.0f / (SLIDER_RANGE * CHAR_WIDTH));
+    clamp(pos, 0, 1);
+
+    value = pos * (s->maxvalue - s->minvalue);
+    steps = Q_rint(value / s->step);
+
+    s->modified = qtrue;
+    s->curvalue = s->minvalue + steps * s->step;
+    return QMS_SILENT;
+}
+
+static menuSound_t Slider_Key(menuSlider_t *s, int key)
 {
     switch (key) {
     case K_END:
+        s->modified = qtrue;
         s->curvalue = s->maxvalue;
         return QMS_MOVE;
     case K_HOME:
+        s->modified = qtrue;
         s->curvalue = s->minvalue;
         return QMS_MOVE;
+    case K_MOUSE1:
+        return Slider_Click(s);
     }
 
     return QMS_NOTHANDLED;
@@ -1430,8 +1620,9 @@ static int Slider_Key(menuSlider_t *s, int key)
 Slider_DoSlide
 =================
 */
-static int Slider_DoSlide(menuSlider_t *s, int dir)
+static menuSound_t Slider_DoSlide(menuSlider_t *s, int dir)
 {
+    s->modified = qtrue;
     s->curvalue += dir * s->step;
 
     cclamp(s->curvalue, s->minvalue, s->maxvalue);
@@ -1453,8 +1644,8 @@ Slider_Draw
 */
 static void Slider_Draw(menuSlider_t *s)
 {
-    int    i, flags;
-    float pos;
+    int     i, flags;
+    float   pos;
 
     flags = s->generic.uiFlags & ~(UI_LEFT | UI_RIGHT);
 
@@ -1513,6 +1704,33 @@ static void Separator_Draw(menuSeparator_t *s)
 /*
 ===================================================================
 
+SAVEGAME CONTROL
+
+===================================================================
+*/
+
+static void Savegame_Push(menuAction_t *a)
+{
+    char *info;
+
+    Z_Free(a->generic.name);
+
+    info = SV_GetSaveInfo(a->cmd);
+    if (info) {
+        a->generic.name = info;
+        a->generic.flags &= ~QMF_GRAYED;
+    } else {
+        a->generic.name = UI_CopyString("<EMPTY>");
+        if (a->generic.type == MTYPE_LOADGAME)
+            a->generic.flags |= QMF_GRAYED;
+    }
+
+    UI_StringDimensions(&a->generic.rect, a->generic.uiFlags, a->generic.name);
+}
+
+/*
+===================================================================
+
 MISC
 
 ===================================================================
@@ -1543,8 +1761,14 @@ Menu_AddItem
 */
 void Menu_AddItem(menuFrameWork_t *menu, void *item)
 {
-    if (menu->nitems >= MAXMENUITEMS) {
+    if (menu->nitems >= MAX_MENU_ITEMS) {
         Com_Error(ERR_FATAL, "Menu_AddItem: too many items");
+    }
+
+    if (!menu->nitems) {
+        menu->items = UI_Malloc(MIN_MENU_ITEMS * sizeof(void *));
+    } else {
+        menu->items = Z_Realloc(menu->items, ALIGN(menu->nitems + 1, MIN_MENU_ITEMS) * sizeof(void *));
     }
 
     menu->items[menu->nitems++] = item;
@@ -1610,6 +1834,8 @@ void Menu_Init(menuFrameWork_t *menu)
             SpinControl_Init(item);
             break;
         case MTYPE_ACTION:
+        case MTYPE_SAVEGAME:
+        case MTYPE_LOADGAME:
             Action_Init(item);
             break;
         case MTYPE_SEPARATOR:
@@ -1634,6 +1860,9 @@ void Menu_Init(menuFrameWork_t *menu)
     if (!focus && menu->nitems) {
         item = menu->items[0];
         ((menuCommon_t *)item)->flags |= QMF_HASFOCUS;
+        if (((menuCommon_t *)item)->status) {
+            menu->status = ((menuCommon_t *)item)->status;
+        }
     }
 
     // calc menu bounding box
@@ -1687,7 +1916,7 @@ void Menu_Size(menuFrameWork_t *menu)
     }
 
     // set menu top/bottom
-    if (menu->transparent) {
+    if (menu->compact) {
         menu->y1 = (uis.height - h) / 2 - MENU_SPACING;
         menu->y2 = (uis.height + h) / 2 + MENU_SPACING;
     } else {
@@ -1799,7 +2028,8 @@ void Menu_SetFocus(menuCommon_t *focus)
             item->flags &= ~QMF_HASFOCUS;
             if (item->focus) {
                 item->focus(item, qfalse);
-            } else if (menu->status == item->status) {
+            } else if (menu->status == item->status
+                       && menu->status != focus->status) {
                 menu->status = NULL;
             }
         }
@@ -1821,6 +2051,10 @@ menuSound_t Menu_AdjustCursor(menuFrameWork_t *m, int dir)
     menuCommon_t *item;
     int cursor, pos;
     int i;
+
+    if (!m->nitems) {
+        return QMS_NOTHANDLED;
+    }
 
     pos = 0;
     for (i = 0; i < m->nitems; i++) {
@@ -1861,6 +2095,51 @@ menuSound_t Menu_AdjustCursor(menuFrameWork_t *m, int dir)
     Menu_SetFocus(item);
 
     return QMS_MOVE;
+}
+
+static void Menu_DrawStatus(menuFrameWork_t *menu)
+{
+    int     linewidth = uis.width / CHAR_WIDTH;
+    int     x, y, l, count;
+    char    *txt, *p;
+    int     lens[8];
+    char    *ptrs[8];
+
+    txt = menu->status;
+    x = 0;
+
+    count = 0;
+    ptrs[0] = txt;
+
+    while (*txt) {
+        // count word length
+        for (p = txt; *p > 32; p++)
+            ;
+        l = p - txt;
+
+        // word wrap
+        if ((l < linewidth && x + l > linewidth) || (x == linewidth)) {
+            if (count == 7)
+                break;
+            lens[count++] = x;
+            ptrs[count] = txt;
+            x = 0;
+        }
+
+        // display character and advance
+        txt++;
+        x++;
+    }
+
+    lens[count++] = x;
+
+    R_DrawFill8(0, menu->y2 - count * CHAR_HEIGHT, uis.width, count * CHAR_HEIGHT, 4);
+
+    for (l = 0; l < count; l++) {
+        x = (uis.width - lens[l] * CHAR_WIDTH) / 2;
+        y = menu->y2 - (count - l) * CHAR_HEIGHT;
+        R_DrawString(x, y, 0, lens[l], ptrs[l], uis.fontHandle);
+    }
 }
 
 /*
@@ -1933,6 +2212,8 @@ void Menu_Draw(menuFrameWork_t *menu)
             SpinControl_Draw(item);
             break;
         case MTYPE_ACTION:
+        case MTYPE_SAVEGAME:
+        case MTYPE_LOADGAME:
             Action_Draw(item);
             break;
         case MTYPE_SEPARATOR:
@@ -1961,9 +2242,7 @@ void Menu_Draw(menuFrameWork_t *menu)
 // draw status bar
 //
     if (menu->status) {
-        R_DrawFill8(0, menu->y2 - CHAR_HEIGHT, uis.width, CHAR_HEIGHT, 4);
-        UI_DrawString(uis.width / 2, menu->y2 - CHAR_HEIGHT,
-                      UI_CENTER, menu->status);
+        Menu_DrawStatus(menu);
     }
 }
 
@@ -1991,6 +2270,8 @@ menuSound_t Menu_SelectItem(menuFrameWork_t *s)
     case MTYPE_ACTION:
     case MTYPE_LIST:
     case MTYPE_BITMAP:
+    case MTYPE_SAVEGAME:
+    case MTYPE_LOADGAME:
         return Common_DoEnter(item);
     default:
         return QMS_NOTHANDLED;
@@ -2055,7 +2336,14 @@ menuSound_t Menu_CharEvent(menuCommon_t *item, int key)
 
 menuSound_t Menu_MouseMove(menuCommon_t *item)
 {
-    return QMS_NOTHANDLED;
+    switch (item->type) {
+    case MTYPE_LIST:
+        return MenuList_MouseMove((menuList_t *)item);
+    case MTYPE_SLIDER:
+        return Slider_MouseMove((menuSlider_t *)item);
+    default:
+        return QMS_NOTHANDLED;
+    }
 }
 
 static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
@@ -2064,6 +2352,7 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
 
     switch (key) {
     case K_ESCAPE:
+    case K_MOUSE2:
         UI_PopMenu();
         return QMS_OUT;
 
@@ -2091,7 +2380,7 @@ static menuSound_t Menu_DefaultKey(menuFrameWork_t *m, int key)
         return Menu_SlideItem(m, 1);
 
     case K_MOUSE1:
-    case K_MOUSE2:
+    //case K_MOUSE2:
     case K_MOUSE3:
         item = Menu_HitTest(m);
         if (!item) {
@@ -2195,6 +2484,10 @@ qboolean Menu_Push(menuFrameWork_t *menu)
         case MTYPE_FIELD:
             Field_Push(item);
             break;
+        case MTYPE_SAVEGAME:
+        case MTYPE_LOADGAME:
+            Savegame_Push(item);
+            break;
         default:
             break;
         }
@@ -2224,8 +2517,10 @@ void Menu_Pop(menuFrameWork_t *menu)
             Strings_Pop(item);
             break;
         case MTYPE_SPINCONTROL:
-        case MTYPE_TOGGLE:
             SpinControl_Pop(item);
+            break;
+        case MTYPE_TOGGLE:
+            Toggle_Pop(item);
             break;
         case MTYPE_KEYBIND:
             Keybind_Pop(item);
@@ -2249,6 +2544,8 @@ void Menu_Free(menuFrameWork_t *menu)
 
         switch (((menuCommon_t *)item)->type) {
         case MTYPE_ACTION:
+        case MTYPE_SAVEGAME:
+        case MTYPE_LOADGAME:
             Action_Free(item);
             break;
         case MTYPE_SLIDER:
@@ -2282,6 +2579,7 @@ void Menu_Free(menuFrameWork_t *menu)
         }
     }
 
+    Z_Free(menu->items);
     Z_Free(menu->title);
     Z_Free(menu->name);
     Z_Free(menu);

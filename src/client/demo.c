@@ -26,6 +26,7 @@ static byte     demo_buffer[MAX_PACKETLEN];
 
 static cvar_t   *cl_demosnaps;
 static cvar_t   *cl_demomsglen;
+static cvar_t   *cl_demowait;
 
 // =========================================================================
 
@@ -106,11 +107,11 @@ static void emit_packet_entities(server_frame_t *from, server_frame_t *to)
         }
 
         if (newnum == oldnum) {
-            // delta update from old position
-            // because the force parm is false, this will not result
-            // in any bytes being emited if the entity has not changed at all
-            // note that players are always 'newentities' in compatibility mode,
-            // this updates their oldorigin always and prevents warping
+            // Delta update from old position. Because the force parm is false,
+            // this will not result in any bytes being emitted if the entity has
+            // not changed at all. Note that players are always 'newentities',
+            // this updates their old_origin always and prevents warping in case
+            // of packet loss.
             MSG_PackEntity(&oldpack, oldent, qfalse);
             MSG_PackEntity(&newpack, newent, qfalse);
             MSG_WriteDeltaEntity(&oldpack, &newpack,
@@ -274,14 +275,6 @@ void CL_Stop_f(void)
         return;
     }
 
-    if (cls.netchan && cls.serverProtocol >= PROTOCOL_VERSION_R1Q2) {
-        // tell the server we finished recording
-        MSG_WriteByte(clc_setting);
-        MSG_WriteShort(CLS_RECORDING);
-        MSG_WriteShort(0);
-        MSG_FlushTo(&cls.netchan->message);
-    }
-
 // finish up
     msglen = (uint32_t)-1;
     FS_Write(&msglen, 4, cls.demo.recording);
@@ -298,6 +291,9 @@ void CL_Stop_f(void)
 
 // print some statistics
     Com_Printf("Stopped demo (%s).\n", buffer);
+
+// tell the server we finished recording
+    CL_UpdateRecordingSetting();
 }
 
 static const cmd_option_t o_record[] = {
@@ -341,6 +337,7 @@ static void CL_Record_f(void)
             return;
         case 'z':
             mode |= FS_FLAG_GZIP;
+            break;
         case 'e':
             size = MAX_PACKETLEN_WRITABLE;
             break;
@@ -391,13 +388,8 @@ static void CL_Record_f(void)
     // clear dirty configstrings
     memset(cl.dcs, 0, sizeof(cl.dcs));
 
-    if (cls.netchan && cls.serverProtocol >= PROTOCOL_VERSION_R1Q2) {
-        // tell the server we are recording
-        MSG_WriteByte(clc_setting);
-        MSG_WriteShort(CLS_RECORDING);
-        MSG_WriteShort(1);
-        MSG_FlushTo(&cls.netchan->message);
-    }
+    // tell the server we are recording
+    CL_UpdateRecordingSetting();
 
     //
     // write out messages to hold the startup information
@@ -660,19 +652,37 @@ static void update_status(void)
     }
 }
 
-static void parse_next_message(void)
+static int parse_next_message(int wait)
 {
     int ret;
 
     ret = read_next_message(cls.demo.playback);
-    if (ret <= 0) {
+    if (ret < 0 || (ret == 0 && wait == 0)) {
         finish_demo(ret);
-        return;
+        return -1;
+    }
+
+    update_status();
+
+    if (ret == 0) {
+        cls.demo.eof = qtrue;
+        return -1;
     }
 
     CL_ParseServerMessage();
 
-    update_status();
+    // if recording demo, write the message out
+    if (cls.demo.recording && !cls.demo.paused && CL_FRAMESYNC) {
+        CL_WriteDemoMessage(&cls.demo.buffer);
+    }
+
+    // if running GTV server, transmit to client
+    CL_GTV_Transmit();
+
+    // save a snapshot once the full packet is parsed
+    CL_EmitDemoSnapshot();
+
+    return 0;
 }
 
 /*
@@ -724,13 +734,16 @@ static void CL_PlayDemo_f(void)
     Q_strlcpy(cls.servername, COM_SkipPath(name), sizeof(cls.servername));
     cls.serverAddress.type = NA_LOOPBACK;
 
-    Con_Popup();
+    Con_Popup(qtrue);
     SCR_UpdateScreen();
 
+    // parse the first message just read
     CL_ParseServerMessage();
+
+    // read and parse messages util `precache' command
     while (cls.state == ca_connected) {
         Cbuf_Execute(&cl_cmdbuf);
-        parse_next_message();
+        parse_next_message(0);
     }
 }
 
@@ -934,6 +947,10 @@ static void CL_Seek_f(void)
         // already there
         return;
 
+    if (frames > 0 && cls.demo.eof && cl_demowait->integer)
+        // already at end
+        return;
+
     // disable effects processing
     cls.demo.seeking = qtrue;
 
@@ -959,6 +976,9 @@ static void CL_Seek_f(void)
                 Com_EPrintf("Couldn't seek demo: %s\n", Q_ErrorString(ret));
                 goto done;
             }
+
+            // clear end-of-file flag
+            cls.demo.eof = qfalse;
 
             // reset configstrings
             for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
@@ -987,6 +1007,10 @@ static void CL_Seek_f(void)
     // skip forward to destination frame
     while (cls.demo.frames_read < dest) {
         ret = read_next_message(cls.demo.playback);
+        if (ret == 0 && cl_demowait->integer) {
+            cls.demo.eof = qtrue;
+            break;
+        }
         if (ret <= 0) {
             finish_demo(ret);
             return;
@@ -1203,24 +1227,31 @@ void CL_DemoFrame(int msec)
     }
 
     if (cls.state != ca_active) {
-        parse_next_message();
+        parse_next_message(0);
         return;
     }
 
     if (com_timedemo->integer) {
-        parse_next_message();
+        parse_next_message(0);
         cl.time = cl.servertime;
         cls.demo.time_frames++;
+        return;
+    }
+
+    // wait at the end of demo
+    if (cls.demo.eof) {
+        if (!cl_demowait->integer)
+            finish_demo(0);
         return;
     }
 
     // cl.time has already been advanced for this client frame
     // read the next frame to start lerp cycle again
     while (cl.servertime < cl.time) {
-        parse_next_message();
-        if (cls.state != ca_active) {
+        if (parse_next_message(cl_demowait->integer))
             break;
-        }
+        if (cls.state != ca_active)
+            break;
     }
 }
 
@@ -1243,6 +1274,7 @@ void CL_InitDemos(void)
 {
     cl_demosnaps = Cvar_Get("cl_demosnaps", "10", 0);
     cl_demomsglen = Cvar_Get("cl_demomsglen", va("%d", MAX_PACKETLEN_WRITABLE_DEFAULT), 0);
+    cl_demowait = Cvar_Get("cl_demowait", "0", 0);
 
     Cmd_Register(c_demo);
     List_Init(&cls.demo.snapshots);

@@ -63,20 +63,23 @@ void CL_ParsePlayerSkin(char *name, char *model, char *skin, const char *s)
     if (!t)
         t = strchr(model, '\\');
     if (!t)
-        t = model;
-    if (t == model)
         goto default_model;
-    *t++ = 0;
+    *t = 0;
+
+    // isolate the skin name
+    strcpy(skin, t + 1);
+
+    // fix empty model to male
+    if (t == model)
+        strcpy(model, "male");
 
     // apply restrictions on skins
-    if (cl_noskins->integer == 2 || !COM_IsPath(t))
+    if (cl_noskins->integer == 2 || !COM_IsPath(skin))
         goto default_skin;
 
     if (cl_noskins->integer || !COM_IsPath(model))
         goto default_model;
 
-    // isolate the skin name
-    strcpy(skin, t);
     return;
 
 default_skin:
@@ -159,7 +162,7 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
         Q_concat(weapon_filename, sizeof(weapon_filename),
                  "players/", model_name, "/", cl.weaponModels[i], NULL);
         ci->weaponmodel[i] = R_RegisterModel(weapon_filename);
-        if (!ci->weaponmodel[i] && Q_stricmp(model_name, "male")) {
+        if (!ci->weaponmodel[i] && !Q_stricmp(model_name, "cyborg")) {
             // try male
             Q_concat(weapon_filename, sizeof(weapon_filename),
                      "players/male/", cl.weaponModels[i], NULL);
@@ -188,49 +191,6 @@ void CL_LoadClientinfo(clientinfo_t *ci, const char *s)
         ci->model_name[0] = 0;
         ci->skin_name[0] = 0;
     }
-}
-
-/*
-=================
-CL_LoadState
-=================
-*/
-void CL_LoadState(load_state_t state)
-{
-    extern void VID_PumpEvents(void);
-    const char *s;
-
-    switch (state) {
-    case LOAD_MAP:
-        s = cl.configstrings[CS_MODELS + 1];
-        break;
-    case LOAD_MODELS:
-        s = "models";
-        break;
-    case LOAD_IMAGES:
-        s = "images";
-        break;
-    case LOAD_CLIENTS:
-        s = "clients";
-        break;
-    case LOAD_SOUNDS:
-        s = "sounds";
-        break;
-    case LOAD_FINISH:
-        s = NULL;
-        break;
-    default:
-        return;
-    }
-
-    if (s) {
-        Con_Printf("Loading %s...\r", s);
-    } else {
-        Con_Print("\r");
-    }
-
-    SCR_UpdateScreen();
-    VID_PumpEvents();
 }
 
 /*
@@ -458,12 +418,10 @@ void CL_UpdateConfigstring(int index)
         return;
     }
 
-#if USE_LIGHTSTYLES
     if (index >= CS_LIGHTS && index < CS_LIGHTS + MAX_LIGHTSTYLES) {
         CL_SetLightStyle(index - CS_LIGHTS, s);
         return;
     }
-#endif
 
     if (cls.state < ca_precached) {
         return;

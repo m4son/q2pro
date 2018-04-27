@@ -41,6 +41,7 @@ cvar_t  *sv_fps;
 cvar_t  *sv_timeout;            // seconds without any message
 cvar_t  *sv_zombietime;         // seconds to sink messages after disconnect
 cvar_t  *sv_ghostime;
+cvar_t  *sv_idlekick;
 
 cvar_t  *sv_password;
 cvar_t  *sv_reserved_password;
@@ -88,6 +89,8 @@ cvar_t  *sv_uptime;
 cvar_t  *sv_auth_limit;
 cvar_t  *sv_rcon_limit;
 cvar_t  *sv_namechange_limit;
+
+cvar_t  *sv_allow_unconnected_cmds;
 
 cvar_t  *g_features;
 
@@ -365,7 +368,7 @@ addrmatch_t *SV_MatchAddress(list_t *list, netadr_t *addr)
     addrmatch_t *match;
 
     LIST_FOR_EACH(addrmatch_t, match, list, entry) {
-        if ((addr->ip.u32 & match->mask) == (match->addr.u32 & match->mask)) {
+        if (NET_IsEqualBaseAdrMask(addr, &match->addr, &match->mask)) {
             match->hits++;
             match->time = time(NULL);
             return match;
@@ -581,7 +584,7 @@ static void SVC_GetChallenge(void)
         }
     }
 
-    challenge = ((rand() << 16) | rand()) & 0x7fffffff;
+    challenge = (((unsigned)rand() << 16) | rand()) & 0x7fffffff;
     if (i == MAX_CHALLENGES) {
         // overwrite the oldest
         svs.challenges[oldest].challenge = challenge;
@@ -687,21 +690,34 @@ static qboolean permit_connection(conn_params_t *p)
     if (sv_locked->integer)
         return reject("Server is locked.\n");
 
-    // limit number of connections from single IP
+    // link-local IPv6 addresses are permitted without sv_iplimit check
+    if (net_from.type == NA_IP6 && NET_IsLanAddress(&net_from))
+        return qtrue;
+
+    // limit number of connections from single IPv4 address or /48 IPv6 network
     if (sv_iplimit->integer > 0) {
         count = 0;
         FOR_EACH_CLIENT(cl) {
-            if (NET_IsEqualBaseAdr(&net_from, &cl->netchan->remote_address)) {
-                if (cl->state == cs_zombie) {
-                    count++;
-                } else {
-                    count += 2;
-                }
-            }
+            netadr_t *adr = &cl->netchan->remote_address;
+
+            if (net_from.type != adr->type)
+                continue;
+            if (net_from.type == NA_IP && net_from.ip.u32[0] != adr->ip.u32[0])
+                continue;
+            if (net_from.type == NA_IP6 && memcmp(net_from.ip.u8, adr->ip.u8, 48 / CHAR_BIT))
+                continue;
+
+            if (cl->state == cs_zombie)
+                count += 1;
+            else
+                count += 2;
         }
-        count >>= 1;
-        if (count >= sv_iplimit->integer)
-            return reject("Too many connections from your IP address.\n");
+        if (count / 2 >= sv_iplimit->integer) {
+            if (net_from.type == NA_IP6)
+                return reject("Too many connections from your IPv6 network.\n");
+            else
+                return reject("Too many connections from your IP address.\n");
+        }
     }
 
     return qtrue;
@@ -793,6 +809,26 @@ static qboolean parse_enhanced_params(conn_params_t *p)
     return qtrue;
 }
 
+static char *userinfo_ip_string(void)
+{
+    static char s[MAX_QPATH];
+
+    // fake up reserved IPv4 address to prevent IPv6 unaware mods from exploding
+    if (net_from.type == NA_IP6 && !(g_features->integer & GMF_IPV6_ADDRESS_AWARE)) {
+        uint8_t res = 0;
+        int i;
+
+        // stuff /48 network part into the last byte
+        for (i = 0; i < 48 / CHAR_BIT; i++)
+            res ^= net_from.ip.u8[i];
+
+        Q_snprintf(s, sizeof(s), "198.51.100.%u:%u", res, BigShort(net_from.port));
+        return s;
+    }
+
+    return NET_AdrToString(&net_from);
+}
+
 static qboolean parse_userinfo(conn_params_t *params, char *userinfo)
 {
     char *info, *s;
@@ -836,18 +872,20 @@ static qboolean parse_userinfo(conn_params_t *params, char *userinfo)
     // copy userinfo off
     Q_strlcpy(userinfo, info, MAX_INFO_STRING);
 
-    // make sure mvdspec key is not set
-    Info_RemoveKey(userinfo, "mvdspec");
+    // mvdspec, ip, etc are passed in extra userinfo if supported
+    if (!(g_features->integer & GMF_EXTRA_USERINFO)) {
+        // make sure mvdspec key is not set
+        Info_RemoveKey(userinfo, "mvdspec");
 
-    if (sv_password->string[0] || sv_reserved_password->string[0]) {
-        // unset password key to make game mod happy
-        Info_RemoveKey(userinfo, "password");
+        if (sv_password->string[0] || sv_reserved_password->string[0]) {
+            // unset password key to make game mod happy
+            Info_RemoveKey(userinfo, "password");
+        }
+
+        // force the IP key/value pair so the game can filter based on ip
+        if (!Info_SetValueForKey(userinfo, "ip", userinfo_ip_string()))
+            return reject("Oversize userinfo string.\n");
     }
-
-    // force the IP key/value pair so the game can filter based on ip
-    s = NET_AdrToString(&net_from);
-    if (!Info_SetValueForKey(userinfo, "ip", s))
-        return reject("Oversize userinfo string.\n");
 
     return qtrue;
 }
@@ -987,9 +1025,28 @@ static void send_connect_packet(client_t *newcl, int nctype)
                       ncstring, acstring, dlstring1, dlstring2, newcl->mapname);
 }
 
+// converts all the extra positional parameters to `connect' command into an
+// infostring appended to normal userinfo after terminating NUL. game mod can
+// then access these parameters in ClientConnect callback.
+static void append_extra_userinfo(conn_params_t *params, char *userinfo)
+{
+    if (!(g_features->integer & GMF_EXTRA_USERINFO)) {
+        userinfo[strlen(userinfo) + 1] = 0;
+        return;
+    }
+
+    Q_snprintf(userinfo + strlen(userinfo) + 1, MAX_INFO_STRING,
+               "\\challenge\\%d\\ip\\%s"
+               "\\major\\%d\\minor\\%d\\netchan\\%d"
+               "\\packetlen\\%d\\qport\\%d\\zlib\\%d",
+               params->challenge, userinfo_ip_string(),
+               params->protocol, params->version, params->nctype,
+               params->maxlength, params->qport, params->has_zlib);
+}
+
 static void SVC_DirectConnect(void)
 {
-    char            userinfo[MAX_INFO_STRING];
+    char            userinfo[MAX_INFO_STRING * 2];
     conn_params_t   params;
     client_t        *newcl;
     int             number;
@@ -1042,6 +1099,8 @@ static void SVC_DirectConnect(void)
 #endif
 
     init_pmove_and_es_flags(newcl);
+
+    append_extra_userinfo(&params, userinfo);
 
     // get the game a chance to reject this connection or modify the userinfo
     sv_client = newcl;
@@ -1096,6 +1155,7 @@ static void SVC_DirectConnect(void)
     newcl->framenum = 1; // frame 0 can't be used
     newcl->lastframe = -1;
     newcl->lastmessage = svs.realtime;    // don't timeout
+    newcl->lastactivity = svs.realtime;
     newcl->min_ping = 9999;
 }
 
@@ -1510,6 +1570,7 @@ static void SV_CheckTimeouts(void)
     unsigned    zombie_time = 1000 * sv_zombietime->value;
     unsigned    drop_time   = 1000 * sv_timeout->value;
     unsigned    ghost_time  = 1000 * sv_ghostime->value;
+    unsigned    idle_time   = 1000 * sv_idlekick->value;
     unsigned    delta;
 
     FOR_EACH_CLIENT(client) {
@@ -1546,6 +1607,12 @@ static void SV_CheckTimeouts(void)
 
         if (client->frames_nodelta > 64 && !sv_allow_nodelta->integer) {
             SV_DropClient(client, "too many nodelta frames");
+            continue;
+        }
+
+        delta = svs.realtime - client->lastactivity;
+        if (idle_time && delta > idle_time) {
+            SV_DropClient(client, "idling");
             continue;
         }
     }
@@ -1870,10 +1937,11 @@ void SV_UserinfoChanged(client_t *cl)
             MVD_GameClientNameChanged(cl->edict, name);
         } else
 #endif
-            if (sv_show_name_changes->integer) {
-                SV_BroadcastPrintf(PRINT_HIGH, "%s changed name to %s\n",
-                                   cl->name, name);
-            }
+        if (sv_show_name_changes->integer > 1 ||
+            (sv_show_name_changes->integer == 1 && cl->state == cs_spawned)) {
+            SV_BroadcastPrintf(PRINT_HIGH, "%s changed name to %s\n",
+                               cl->name, name);
+        }
     }
     memcpy(cl->name, name, len + 1);
 
@@ -1990,7 +2058,9 @@ void SV_Init(void)
 
     AC_Register();
 
-    Cvar_Get("protocol", va("%i", PROTOCOL_VERSION_DEFAULT), CVAR_SERVERINFO | CVAR_ROM);
+    SV_RegisterSavegames();
+
+    Cvar_Get("protocol", STRINGIFY(PROTOCOL_VERSION_DEFAULT), CVAR_SERVERINFO | CVAR_ROM);
 
     Cvar_Get("skill", "1", CVAR_LATCH);
     Cvar_Get("deathmatch", "1", CVAR_SERVERINFO | CVAR_LATCH);
@@ -2009,6 +2079,7 @@ void SV_Init(void)
     sv_timeout = Cvar_Get("timeout", "90", 0);
     sv_zombietime = Cvar_Get("zombietime", "2", 0);
     sv_ghostime = Cvar_Get("sv_ghostime", "6", 0);
+    sv_idlekick = Cvar_Get("sv_idlekick", "0", 0);
     sv_showclamp = Cvar_Get("showclamp", "0", 0);
     sv_enforcetime = Cvar_Get("sv_enforcetime", "1", 0);
     sv_allow_nodelta = Cvar_Get("sv_allow_nodelta", "1", 0);
@@ -2068,6 +2139,8 @@ void SV_Init(void)
 
     sv_namechange_limit = Cvar_Get("sv_namechange_limit", "5/min", 0);
     sv_namechange_limit->changed = sv_namechange_limit_changed;
+
+    sv_allow_unconnected_cmds = Cvar_Get("sv_allow_unconnected_cmds", "0", 0);
 
     Cvar_Get("sv_features", va("%d", SV_FEATURES), CVAR_ROM);
     g_features = Cvar_Get("g_features", "0", CVAR_ROM);

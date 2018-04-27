@@ -21,7 +21,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 //
 
 #include "client.h"
-#include <setjmp.h>
 
 static cvar_t   *mvd_admin_password;
 static cvar_t   *mvd_part_filter;
@@ -38,8 +37,6 @@ static cvar_t   *mvd_chase_prefix;
 mvd_client_t    *mvd_clients;
 
 mvd_player_t    mvd_dummy;
-
-extern jmp_buf  mvd_jmpbuf;
 
 static int      mvd_numplayers;
 
@@ -122,7 +119,7 @@ static void MVD_LayoutClients(mvd_client_t *client)
     layout[total] = 0;
 
     // the very first layout update is reliably delivered
-    flags = MSG_CLEAR;
+    flags = MSG_CLEAR | MSG_COMPRESS;
     if (!client->layout_time) {
         flags |= MSG_RELIABLE;
     }
@@ -224,7 +221,7 @@ static void MVD_LayoutChannels(mvd_client_t *client)
     // send the layout
     MSG_WriteByte(svc_layout);
     MSG_WriteData(layout, total + 1);
-    SV_ClientAddMessage(client->cl, MSG_RELIABLE | MSG_CLEAR);
+    SV_ClientAddMessage(client->cl, MSG_RELIABLE | MSG_CLEAR | MSG_COMPRESS);
 
     client->layout_time = svs.realtime;
 }
@@ -232,6 +229,7 @@ static void MVD_LayoutChannels(mvd_client_t *client)
 #define MENU_ITEMS  10
 #define YES "\xD9\xE5\xF3"
 #define NO "\xCE\xEF"
+#define DEFAULT "\xC4\xE5\xE6\xE1\xF5\xEC\xF4"
 
 static int clamp_menu_cursor(mvd_client_t *client)
 {
@@ -256,7 +254,7 @@ static void MVD_LayoutMenu(mvd_client_t *client)
         "yv 96 string \"%cIgnore spectator chat: %s\""
         "yv 104 string \"%cIgnore connect msgs:   %s\""
         "yv 112 string \"%cIgnore player chat:    %s\""
-        "yv 120 string \"%cIgnore player FOV:     %s\""
+        "yv 120 string \"%cIgnore player FOV: %7s\""
         "yv 128 string \" (use 'set uf %d u' in cfg)\""
         "yv 144 string2 \"%cExit menu\""
         "%s xv %d yv 172 string2 " VERSION;
@@ -274,7 +272,8 @@ static void MVD_LayoutMenu(mvd_client_t *client)
                         cur[5], (client->uf & UF_MUTE_OBSERVERS) ? YES : NO,
                         cur[6], (client->uf & UF_MUTE_MISC) ? YES : NO,
                         cur[7], (client->uf & UF_MUTE_PLAYERS) ? YES : NO,
-                        cur[8], (client->uf & UF_LOCALFOV) ? YES : NO,
+                        cur[8], (client->uf & UF_LOCALFOV) ? YES :
+                        (client->uf & UF_PLAYERFOV) ? NO " " : DEFAULT,
                         client->uf,
                         cur[9], client->mvd->state == MVD_WAITING ?
                         "xv 0 yv 160 cstring [BUFFERING]" : "",
@@ -283,7 +282,7 @@ static void MVD_LayoutMenu(mvd_client_t *client)
     // send the layout
     MSG_WriteByte(svc_layout);
     MSG_WriteData(layout, total + 1);
-    SV_ClientAddMessage(client->cl, MSG_RELIABLE | MSG_CLEAR);
+    SV_ClientAddMessage(client->cl, MSG_RELIABLE | MSG_CLEAR | MSG_COMPRESS);
 
     client->layout_time = svs.realtime;
 }
@@ -291,7 +290,7 @@ static void MVD_LayoutMenu(mvd_client_t *client)
 static void MVD_LayoutScores(mvd_client_t *client)
 {
     mvd_t *mvd = client->mvd;
-    int flags = MSG_CLEAR;
+    int flags = MSG_CLEAR | MSG_COMPRESS;
     char *layout;
 
     if (client->layout_type == LAYOUT_OLDSCORES) {
@@ -352,7 +351,7 @@ static void MVD_SetDefaultLayout(mvd_client_t *client)
         type = LAYOUT_CHANNELS;
     } else if (mvd->intermission) {
         type = LAYOUT_SCORES;
-    } else if (client->target) {
+    } else if (client->target && !(mvd->flags & MVF_SINGLEPOV)) {
         type = LAYOUT_FOLLOW;
     } else {
         type = LAYOUT_NONE;
@@ -464,12 +463,12 @@ static void MVD_FollowStop(mvd_client_t *client)
     client->ps.fov = client->fov;
 
     // send delta configstrings
-    write_cs_list(client, mvd->dummy->configstrings);
+    if (mvd->dummy)
+        write_cs_list(client, mvd->dummy->configstrings);
 
     client->clientNum = mvd->clientNum;
     client->oldtarget = client->target;
     client->target = NULL;
-    client->chase_mask = 0;
 
     if (client->layout_type == LAYOUT_FOLLOW) {
         MVD_SetDefaultLayout(client);
@@ -486,7 +485,6 @@ static void MVD_FollowStart(mvd_client_t *client, mvd_player_t *target)
 
     client->oldtarget = client->target;
     client->target = target;
-    client->chase_mask = 0;
 
     // send delta configstrings
     write_cs_list(client, target->configstrings);
@@ -497,88 +495,81 @@ static void MVD_FollowStart(mvd_client_t *client, mvd_player_t *target)
     MVD_UpdateClient(client);
 }
 
-static void MVD_FollowFirst(mvd_client_t *client)
+static qboolean MVD_TestTarget(mvd_client_t *client, mvd_player_t *target)
+{
+    mvd_t *mvd = client->mvd;
+
+    if (!target)
+        return qfalse;
+
+    if (!target->inuse)
+        return qfalse;
+
+    if (target == mvd->dummy)
+        return qfalse;
+
+    if (!client->chase_auto)
+        return qtrue;
+
+    return Q_IsBitSet(client->chase_bitmap, target - mvd->players);
+}
+
+static mvd_player_t *MVD_FollowNext(mvd_client_t *client, mvd_player_t *from)
 {
     mvd_t *mvd = client->mvd;
     mvd_player_t *target;
-    int i;
 
-    // pick up the first active player
-    for (i = 0; i < mvd->maxclients; i++) {
-        target = &mvd->players[i];
-        if (target->inuse && target != mvd->dummy) {
-            MVD_FollowStart(client, target);
-            return;
-        }
+    if (!mvd->players) {
+        return NULL;
     }
 
-    SV_ClientPrintf(client->cl, PRINT_MEDIUM, "[MVD] No players to chase.\n");
-}
-
-static void MVD_FollowLast(mvd_client_t *client)
-{
-    mvd_t *mvd = client->mvd;
-    mvd_player_t *target;
-    int i;
-
-    // pick up the last active player
-    for (i = 0; i < mvd->maxclients; i++) {
-        target = &mvd->players[mvd->maxclients - i - 1];
-        if (target->inuse && target != mvd->dummy) {
-            MVD_FollowStart(client, target);
-            return;
-        }
+    if (!from) {
+        from = mvd->players + mvd->maxclients - 1;
     }
 
-    SV_ClientPrintf(client->cl, PRINT_MEDIUM, "[MVD] No players to chase.\n");
-}
-
-static void MVD_FollowNext(mvd_client_t *client)
-{
-    mvd_t *mvd = client->mvd;
-    mvd_player_t *target = client->target;
-
-    if (!target) {
-        MVD_FollowFirst(client);
-        return;
-    }
-
+    target = from;
     do {
         if (target == mvd->players + mvd->maxclients - 1) {
             target = mvd->players;
         } else {
             target++;
         }
-        if (target == client->target) {
-            return;
+        if (target == from) {
+            return NULL;
         }
-    } while (!target->inuse || target == mvd->dummy);
+    } while (!MVD_TestTarget(client, target));
 
     MVD_FollowStart(client, target);
+    return target;
 }
 
-static void MVD_FollowPrev(mvd_client_t *client)
+static mvd_player_t *MVD_FollowPrev(mvd_client_t *client, mvd_player_t *from)
 {
     mvd_t *mvd = client->mvd;
-    mvd_player_t *target = client->target;
+    mvd_player_t *target;
 
-    if (!target) {
-        MVD_FollowLast(client);
-        return;
+    if (!mvd->players) {
+        return NULL;
     }
 
+    if (!from) {
+        from = mvd->players;
+    }
+
+    target = from;
     do {
         if (target == mvd->players) {
             target = mvd->players + mvd->maxclients - 1;
         } else {
             target--;
         }
-        if (target == client->target) {
-            return;
+        if (target == from) {
+            return NULL;
         }
-    } while (!target->inuse || target == mvd->dummy);
+    } while (!MVD_TestTarget(client, target));
 
     MVD_FollowStart(client, target);
+    return target;
 }
 
 static mvd_player_t *MVD_MostFollowed(mvd_t *mvd)
@@ -604,45 +595,75 @@ static mvd_player_t *MVD_MostFollowed(mvd_t *mvd)
     return target;
 }
 
-static void MVD_UpdateClient(mvd_client_t *client)
+static void MVD_UpdateTarget(mvd_client_t *client)
 {
     mvd_t *mvd = client->mvd;
     mvd_player_t *target;
-    int i, mask = client->chase_mask;
     entity_state_t *ent;
+    int i;
 
-    if (mask) {
-        // find new target for auto chasecam
-        for (i = 0, target = mvd->players; i < mvd->maxclients; i++, target++) {
+    // find new target for effects auto chasecam
+    if (client->chase_mask && !mvd->intermission) {
+        for (i = 0; i < mvd->maxclients; i++) {
+            target = &mvd->players[i];
             if (!target->inuse || target == mvd->dummy) {
                 continue;
             }
             ent = &mvd->edicts[i + 1].s;
-            if (ent->effects & mask) {
+            if (ent->effects & client->chase_mask) {
                 MVD_FollowStart(client, target);
-                client->chase_mask = mask;
-                goto copy;
+                return;
             }
         }
     }
 
+    // check if current target is still active
     target = client->target;
-    if (!target) {
-        // copy stats of the dummy MVD observer
-        target = mvd->dummy;
-        for (i = 0; i < MAX_STATS; i++) {
-            client->ps.stats[i] = target->ps.stats[i];
+    if (target) {
+        if (target->inuse) {
+            return;
         }
-    } else {
-        if (!target->inuse) {
-            // player is no longer active
+        if (!MVD_FollowNext(client, target)) {
             MVD_FollowStop(client);
             return;
         }
-copy:
+    }
+
+    // find the next target for auto chasecam
+    target = client->oldtarget;
+    if (client->chase_auto) {
+        if (MVD_TestTarget(client, target)) {
+            MVD_FollowStart(client, target);
+        } else {
+            MVD_FollowNext(client, target);
+        }
+        return;
+    }
+
+    // if the map has just started, try to return to the previous target
+    if (target && target->inuse && client->chase_wait) {
+        MVD_FollowStart(client, target);
+    }
+}
+
+static void MVD_UpdateClient(mvd_client_t *client)
+{
+    mvd_t *mvd = client->mvd;
+    mvd_player_t *target = client->target;
+    int i;
+
+    if (!target) {
+        // copy stats of the dummy MVD observer
+        if (mvd->dummy) {
+            for (i = 0; i < MAX_STATS; i++) {
+                client->ps.stats[i] = mvd->dummy->ps.stats[i];
+            }
+        }
+    } else {
         // copy entire player state
         client->ps = target->ps;
-        if (client->uf & UF_LOCALFOV) {
+        if ((client->uf & UF_LOCALFOV) || (!(client->uf & UF_PLAYERFOV)
+                                           && client->ps.fov >= 90)) {
             client->ps.fov = client->fov;
         }
         client->ps.pmove.pm_flags |= PMF_NO_PREDICTION;
@@ -650,12 +671,11 @@ copy:
         client->clientNum = target - mvd->players;
 
         if (target != mvd->dummy) {
-            if (mvd_stats_hack->integer) {
+            if (mvd_stats_hack->integer && mvd->dummy) {
                 // copy stats of the dummy MVD observer
-                target = mvd->dummy;
                 for (i = 0; i < MAX_STATS; i++) {
-                    if (mvd_stats_hack->integer & (1 << i)) {
-                        client->ps.stats[i] = target->ps.stats[i];
+                    if (mvd_stats_hack->integer & (1U << i)) {
+                        client->ps.stats[i] = mvd->dummy->ps.stats[i];
                     }
                 }
             }
@@ -750,8 +770,12 @@ void MVD_SwitchChannel(mvd_client_t *client, mvd_t *mvd)
     List_SeqAdd(&mvd->clients, &client->entry);
     client->mvd = mvd;
     client->begin_time = 0;
-    client->target = client->oldtarget = NULL;
+    client->target = NULL;
+    client->oldtarget = NULL;
     client->chase_mask = 0;
+    client->chase_auto = 0;
+    client->chase_wait = 0;
+    memset(client->chase_bitmap, 0, sizeof(client->chase_bitmap));
     MVD_SetServerState(cl, mvd);
 
     // needs to reconnect
@@ -859,7 +883,9 @@ static void MVD_Say_f(mvd_client_t *client, int argnum)
     mvd_t *mvd = client->mvd;
     unsigned delta, delay = mvd_flood_waitdelay->value * 1000;
     unsigned treshold = mvd_flood_persecond->value * 1000;
-    char text[150], *p;
+    char text[150], hightext[150];
+    mvd_client_t *other;
+    client_t *cl;
     unsigned i, j;
 
     if (mvd_flood_mute->integer && !client->admin) {
@@ -900,31 +926,60 @@ static void MVD_Say_f(mvd_client_t *client, int argnum)
 
     Q_snprintf(text, sizeof(text), "[MVD] %s: %s",
                client->cl->name, Cmd_ArgsFrom(argnum));
-    for (p = text; *p; p++) {
-        *p |= 128;
-    }
 
-    MVD_BroadcastPrintf(mvd, PRINT_HIGH, client->admin ?
-                        0 : UF_MUTE_OBSERVERS, "%s\n", text);
+    // color text for legacy clients
+    for (i = 0; text[i]; i++)
+        hightext[i] = text[i] | 128;
+    hightext[i] = 0;
+
+    FOR_EACH_MVDCL(other, mvd) {
+        cl = other->cl;
+        if (cl->state < cs_spawned) {
+            continue;
+        }
+        if (!client->admin && (other->uf & UF_MUTE_OBSERVERS)) {
+            continue;
+        }
+
+        if (cl->protocol == PROTOCOL_VERSION_Q2PRO &&
+            cl->version >= PROTOCOL_VERSION_Q2PRO_SERVER_STATE) {
+            SV_ClientPrintf(cl, PRINT_CHAT, "%s\n", text);
+        } else {
+            SV_ClientPrintf(cl, PRINT_HIGH, "%s\n", hightext);
+        }
+    }
 }
 
 static void MVD_Observe_f(mvd_client_t *client)
 {
-    if (client->mvd == &mvd_waitingRoom) {
+    mvd_t *mvd = client->mvd;
+
+    if (!mvd->players) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
                         "[MVD] Please enter a channel first.\n");
         return;
     }
+
     client->chase_mask = 0;
-    if (client->mvd->intermission) {
+    client->chase_auto = qfalse;
+    client->chase_wait = qfalse;
+
+    if (mvd->intermission) {
         return;
     }
+
     if (client->target) {
         MVD_FollowStop(client);
-    } else if (client->oldtarget && client->oldtarget->inuse) {
+        return;
+    }
+
+    if (client->oldtarget && client->oldtarget->inuse) {
         MVD_FollowStart(client, client->oldtarget);
-    } else {
-        MVD_FollowFirst(client);
+        return;
+    }
+
+    if (!MVD_FollowNext(client, NULL)) {
+        SV_ClientPrintf(client->cl, PRINT_MEDIUM, "[MVD] No players to chase.\n");
     }
 }
 
@@ -939,14 +994,14 @@ static mvd_player_t *MVD_SetPlayer(mvd_client_t *client, const char *s)
         i = atoi(s);
         if (i < 0 || i >= mvd->maxclients) {
             SV_ClientPrintf(client->cl, PRINT_HIGH,
-                            "[MVD] Player number %d is invalid.\n", i);
+                            "[MVD] Player slot number %d is invalid.\n", i);
             return NULL;
         }
 
         player = &mvd->players[i];
         if (!player->inuse || player == mvd->dummy) {
             SV_ClientPrintf(client->cl, PRINT_HIGH,
-                            "[MVD] Player %d is not active.\n", i);
+                            "[MVD] Player slot number %d is not active.\n", i);
             return NULL;
         }
 
@@ -957,7 +1012,7 @@ static mvd_player_t *MVD_SetPlayer(mvd_client_t *client, const char *s)
     match = NULL;
     count = 0;
     for (i = 0, player = mvd->players; i < mvd->maxclients; i++, player++) {
-        if (!player->inuse || player == mvd->dummy) {
+        if (!player->inuse || !player->name[0] || player == mvd->dummy) {
             continue;
         }
         if (!Q_stricmp(player->name, s)) {
@@ -991,7 +1046,7 @@ static void MVD_Follow_f(mvd_client_t *client)
     char *s;
     int mask;
 
-    if (mvd == &mvd_waitingRoom) {
+    if (!mvd->players) {
         SV_ClientPrintf(client->cl, PRINT_HIGH,
                         "[MVD] Please enter a channel first.\n");
         return;
@@ -1046,6 +1101,8 @@ static void MVD_Follow_f(mvd_client_t *client)
         SV_ClientPrintf(client->cl, PRINT_MEDIUM,
                         "[MVD] Chasing players with '%s' powerup.\n", s);
         client->chase_mask = mask;
+        client->chase_auto = qfalse;
+        client->chase_wait = qfalse;
         return;
     }
 
@@ -1053,7 +1110,163 @@ match:
     player = MVD_SetPlayer(client, s);
     if (player) {
         MVD_FollowStart(client, player);
+        client->chase_mask = 0;
+        client->chase_wait = qfalse;
     }
+}
+
+static qboolean count_chase_bits(mvd_client_t *client)
+{
+    mvd_t *mvd = client->mvd;
+    int i, j, count = 0;
+
+    for (i = 0; i < (mvd->maxclients + CHAR_BIT - 1) / CHAR_BIT; i++)
+        if (client->chase_bitmap[i])
+            for (j = 0; j < 8; j++)
+                if (client->chase_bitmap[i] & (1 << j))
+                    count++;
+
+    return count;
+}
+
+static void MVD_AutoFollow_f(mvd_client_t *client)
+{
+    mvd_t *mvd = client->mvd;
+    mvd_player_t *player;
+    char *s, *p;
+    int i, j, argc;
+
+    if (!mvd->players) {
+        SV_ClientPrintf(client->cl, PRINT_HIGH,
+                        "[MVD] Please enter a channel first.\n");
+        return;
+    }
+
+    if (mvd->intermission)
+        return;
+
+    argc = Cmd_Argc();
+    if (argc < 2) {
+        i = count_chase_bits(client);
+        SV_ClientPrintf(client->cl, PRINT_HIGH,
+                        "[MVD] Auto chasing is %s (%d target%s).\n",
+                        client->chase_auto ? "ON" : "OFF", i, i == 1 ? "" : "s");
+        return;
+    }
+
+    s = Cmd_Argv(1);
+    if (!strcmp(s, "add") || !strcmp(s, "rm") || !strcmp(s, "del")) {
+        if (argc < 3) {
+            SV_ClientPrintf(client->cl, PRINT_HIGH,
+                            "Usage: %s %s <wildcard> [...]\n",
+                            Cmd_Argv(0), Cmd_Argv(1));
+            return;
+        }
+
+        for (i = 2; i < argc; i++) {
+            p = Cmd_Argv(i);
+            for (j = 0; j < mvd->maxclients; j++) {
+                player = &mvd->players[j];
+                if (!player->name[0] || player == mvd->dummy)
+                    continue;
+
+                if (!Com_WildCmpEx(p, player->name, 0, qtrue))
+                    continue;
+
+                if (*s == 'a')
+                    Q_SetBit(client->chase_bitmap, j);
+                else
+                    Q_ClearBit(client->chase_bitmap, j);
+            }
+        }
+
+        if (*s == 'a') {
+            MVD_UpdateTarget(client);
+            return;
+        }
+
+        if (!count_chase_bits(client))
+            client->chase_auto = qfalse;
+        return;
+    }
+
+    if (!strcmp(s, "set")) {
+        memset(client->chase_bitmap, 0, sizeof(client->chase_bitmap));
+
+        for (i = 2; i < argc; i++) {
+            j = atoi(Cmd_Argv(i));
+            if (j >= 0 && j < mvd->maxclients)
+                Q_SetBit(client->chase_bitmap, j);
+        }
+
+        if (!count_chase_bits(client))
+            client->chase_auto = qfalse;
+        return;
+    }
+
+    if (!strcmp(s, "list")) {
+        char    buffer[1000];
+        size_t  total, len;
+
+        total = 0;
+        for (i = 0; i < mvd->maxclients; i++) {
+            if (!Q_IsBitSet(client->chase_bitmap, i))
+                continue;
+
+            player = &mvd->players[i];
+            if (player == mvd->dummy)
+                continue;
+
+            len = strlen(player->name);
+            if (len == 0)
+                continue;
+
+            if (total + len + 2 >= sizeof(buffer))
+                break;
+
+            if (total) {
+                buffer[total + 0] = ',';
+                buffer[total + 1] = ' ';
+                total += 2;
+            }
+
+            memcpy(buffer + total, player->name, len);
+            total += len;
+        }
+        buffer[total] = 0;
+
+        if (total)
+            SV_ClientPrintf(client->cl, PRINT_HIGH,
+                            "[MVD] Auto chasing %s\n", buffer);
+        else
+            SV_ClientPrintf(client->cl, PRINT_HIGH,
+                            "[MVD] Auto chase list is empty.\n");
+        return;
+    }
+
+    if (!strcmp(s, "on")) {
+        if (!count_chase_bits(client)) {
+            SV_ClientPrintf(client->cl, PRINT_HIGH,
+                            "[MVD] Please add auto chase targets first.\n");
+            return;
+        }
+
+        client->chase_mask = 0;
+        client->chase_auto = qtrue;
+        client->chase_wait = qfalse;
+        if (!MVD_TestTarget(client, client->target))
+            MVD_FollowNext(client, client->target);
+        return;
+    }
+
+    if (!strcmp(s, "off")) {
+        client->chase_auto = qfalse;
+        return;
+    }
+
+    SV_ClientPrintf(client->cl, PRINT_HIGH,
+                    "[MVD] Usage: %s <add|rm|set|list|on|off> [...]\n",
+                    Cmd_Argv(0));
 }
 
 static void MVD_Invuse_f(mvd_client_t *client)
@@ -1089,7 +1302,11 @@ static void MVD_Invuse_f(mvd_client_t *client)
             client->uf ^= UF_MUTE_PLAYERS;
             break;
         case 8:
-            client->uf ^= UF_LOCALFOV;
+            client->uf &= ~(UF_LOCALFOV | UF_PLAYERFOV);
+            if (uf & UF_LOCALFOV)
+                client->uf |= UF_PLAYERFOV;
+            else if (!(uf & UF_PLAYERFOV))
+                client->uf |= UF_LOCALFOV;
             break;
         case 9:
             MVD_SetDefaultLayout(client);
@@ -1145,6 +1362,9 @@ static void print_channel(client_t *cl, mvd_t *mvd)
             continue;
         }
         len = strlen(player->name);
+        if (len == 0) {
+            continue;
+        }
         if (total + len + 2 >= sizeof(buffer)) {
             break;
         }
@@ -1190,6 +1410,7 @@ static void MVD_Commands_f(mvd_client_t *client)
 {
     SV_ClientPrintf(client->cl, PRINT_HIGH,
                     "chase [player_id]      toggle chasecam mode\n"
+                    "autochase <...>        control automatic chasecam\n"
                     "observe                toggle observer mode\n"
                     "menu                   show main menu\n"
                     "score                  show scoreboard\n"
@@ -1233,6 +1454,10 @@ static void MVD_GameClientCommand(edict_t *ent)
         MVD_Follow_f(client);
         return;
     }
+    if (!strcmp(cmd, "autofollow") || !strcmp(cmd, "autochase")) {
+        MVD_AutoFollow_f(client);
+        return;
+    }
     if (!strcmp(cmd, "observe") || !strcmp(cmd, "spectate") ||
         !strcmp(cmd, "observer") || !strcmp(cmd, "spectator") ||
         !strcmp(cmd, "obs") || !strcmp(cmd, "spec")) {
@@ -1248,7 +1473,8 @@ static void MVD_GameClientCommand(edict_t *ent)
             client->layout_cursor++;
             client->layout_time = 0;
         } else if (!client->mvd->intermission) {
-            MVD_FollowNext(client);
+            MVD_FollowNext(client, client->target);
+            client->chase_mask = 0;
         }
         return;
     }
@@ -1257,7 +1483,8 @@ static void MVD_GameClientCommand(edict_t *ent)
             client->layout_cursor--;
             client->layout_time = 0;
         } else if (!client->mvd->intermission) {
-            MVD_FollowPrev(client);
+            MVD_FollowPrev(client, client->target);
+            client->chase_mask = 0;
         }
         return;
     }
@@ -1640,6 +1867,8 @@ static void MVD_GameClientBegin(edict_t *ent)
                                 "[MVD] %s entered the channel\n", client->cl->name);
         }
         target = MVD_MostFollowed(mvd);
+    } else if (mvd->flags & MVF_SINGLEPOV) {
+        target = MVD_MostFollowed(mvd);
     } else {
         target = client->oldtarget;
     }
@@ -1662,6 +1891,11 @@ static void MVD_GameClientBegin(edict_t *ent)
         VectorScale(mvd->spawnOrigin, 8, client->ps.pmove.origin);
         VectorCopy(mvd->spawnAngles, client->ps.viewangles);
         MVD_FollowStop(client);
+
+        // if the map has just changed, player might not have spawned yet.
+        // save the old target and try to return to it later.
+        client->oldtarget = target;
+        client->chase_wait = qtrue;
     }
 
     mvd_dirty = qtrue;
@@ -1670,27 +1904,19 @@ static void MVD_GameClientBegin(edict_t *ent)
 static void MVD_GameClientUserinfoChanged(edict_t *ent, char *userinfo)
 {
     mvd_client_t *client = EDICT_MVDCL(ent);
-    char *s;
     float fov;
 
-    s = Info_ValueForKey(userinfo, "uf");
-    if (*s) {
-        client->uf = atoi(s);
-    } else {
-        client->uf = UF_LOCALFOV;
-    }
+    client->uf = atoi(Info_ValueForKey(userinfo, "uf"));
 
-    s = Info_ValueForKey(userinfo, "fov");
-    fov = atof(s);
+    fov = atof(Info_ValueForKey(userinfo, "fov"));
     if (fov < 1) {
         fov = 90;
     } else if (fov > 160) {
         fov = 160;
     }
     client->fov = fov;
-    if (client->uf & UF_LOCALFOV) {
+    if (!client->target)
         client->ps.fov = fov;
-    }
 }
 
 void MVD_GameClientNameChanged(edict_t *ent, const char *name)
@@ -1731,6 +1957,59 @@ static void MVD_GameClientDisconnect(edict_t *ent)
     client->begin_time = 0;
 }
 
+static mvd_player_t *MVD_HitPlayer(mvd_client_t *client)
+{
+    mvd_t *mvd = client->mvd;
+    trace_t trace;
+    vec3_t start, end, forward;
+    mvd_player_t *player, *target;
+    edict_t *ent;
+    float fraction;
+    int i;
+
+    if (!mvd->players)
+        return NULL;
+
+    if (mvd->intermission)
+        return NULL;
+
+    VectorMA(client->ps.viewoffset, 0.125f, client->ps.pmove.origin, start);
+    AngleVectors(client->ps.viewangles, forward, NULL, NULL);
+    VectorMA(start, 8192, forward, end);
+
+    if (mvd->cm.cache) {
+        CM_BoxTrace(&trace, start, end, vec3_origin, vec3_origin,
+                    mvd->cm.cache->nodes, CONTENTS_SOLID);
+        fraction = trace.fraction;
+    } else {
+        fraction = 1;
+    }
+
+    target = NULL;
+    for (i = 0; i < mvd->maxclients; i++) {
+        player = &mvd->players[i];
+        if (!player->inuse || player == mvd->dummy)
+            continue;
+
+        ent = &mvd->edicts[i + 1];
+        if (!ent->inuse)
+            continue;
+
+        if (ent->solid != SOLID_BBOX)
+            continue;
+
+        CM_TransformedBoxTrace(&trace, start, end, vec3_origin, vec3_origin,
+                               CM_HeadnodeForBox(ent->mins, ent->maxs),
+                               CONTENTS_MONSTER, ent->s.origin, vec3_origin);
+
+        if (trace.fraction < fraction) {
+            fraction = trace.fraction;
+            target = player;
+        }
+    }
+
+    return target;
+}
 
 static trace_t q_gameabi MVD_Trace(vec3_t start, vec3_t mins, vec3_t maxs, vec3_t end)
 {
@@ -1763,6 +2042,13 @@ static void MVD_GameClientThink(edict_t *ent, usercmd_t *cmd)
     }
 
     if ((cmd->buttons & ~old->buttons) & BUTTON_ATTACK) {
+        mvd_player_t *hit;
+
+        // small hack to allow picking up targets by aim
+        if (client->target == NULL && (hit = MVD_HitPlayer(client)) != NULL) {
+            client->oldtarget = hit;
+        }
+
         MVD_Observe_f(client);
     }
 
@@ -1770,14 +2056,16 @@ static void MVD_GameClientThink(edict_t *ent, usercmd_t *cmd)
         if (cmd->upmove >= 10) {
             if (client->jump_held < 1) {
                 if (!client->mvd->intermission) {
-                    MVD_FollowNext(client);
+                    MVD_FollowNext(client, client->target);
+                    client->chase_mask = 0;
                 }
                 client->jump_held = 1;
             }
         } else if (cmd->upmove <= -10) {
             if (client->jump_held > -1) {
                 if (!client->mvd->intermission) {
-                    MVD_FollowPrev(client);
+                    MVD_FollowPrev(client, client->target);
+                    client->chase_mask = 0;
                 }
                 client->jump_held = -1;
             }
@@ -1889,7 +2177,7 @@ void MVD_UpdateClients(mvd_t *mvd)
     mvd_client_t *client;
 
     // check for intermission
-    if (mvd_freeze_hack->integer) {
+    if (mvd_freeze_hack->integer && mvd->dummy) {
         if (!mvd->intermission) {
             if (mvd->dummy->ps.pmove.pm_type == PM_FREEZE) {
                 MVD_IntermissionStart(mvd);
@@ -1904,6 +2192,7 @@ void MVD_UpdateClients(mvd_t *mvd)
     // update UDP clients
     FOR_EACH_MVDCL(client, mvd) {
         if (client->cl->state == cs_spawned) {
+            MVD_UpdateTarget(client);
             MVD_UpdateClient(client);
             MVD_NotifyClient(client);
         }
@@ -1979,7 +2268,8 @@ void MVD_PrepWorldFrame(void)
 
     // reset events and old origins
     FOR_EACH_MVD(mvd) {
-        for (i = 1, ent = &mvd->edicts[1]; i < mvd->pool.num_edicts; i++, ent++) {
+        for (i = 1; i < mvd->pool.num_edicts; i++) {
+            ent = &mvd->edicts[i];
             if (!ent->inuse) {
                 continue;
             }

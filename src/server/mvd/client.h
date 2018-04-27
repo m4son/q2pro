@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "../server.h"
+#include <setjmp.h>
 
 #define MVD_Malloc(size)    Z_TagMalloc(size, TAG_MVD)
 #define MVD_Mallocz(size)   Z_TagMallocz(size, TAG_MVD)
@@ -35,9 +36,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
     Cvar_FullSet(var, val, CVAR_SERVERINFO | CVAR_GAME, FROM_CODE)
 
 // game features MVD client supports
-#define MVD_FEATURES (GMF_CLIENTNUM | GMF_PROPERINUSE | GMF_WANT_ALL_DISCONNECTS)
+#define MVD_FEATURES    (GMF_CLIENTNUM | GMF_PROPERINUSE | GMF_WANT_ALL_DISCONNECTS)
 
-#define LAYOUT_MSEC        3000
+#define LAYOUT_MSEC     3000
 
 typedef enum {
     LAYOUT_NONE,        // no layout at all
@@ -75,13 +76,18 @@ typedef struct {
     list_t          entry;
     struct mvd_s    *mvd;
     client_t        *cl;
-    qboolean    admin;
-    qboolean    notified;
-    unsigned    begin_time;
-    mvd_player_t *target, *oldtarget;
-    int         chase_mask;
-    float       fov;
-    int         uf;
+    qboolean        admin;
+    qboolean        notified;
+    unsigned        begin_time;
+    float           fov;
+    int             uf;
+
+    mvd_player_t    *target;
+    mvd_player_t    *oldtarget;
+    int             chase_mask;
+    qboolean        chase_auto;
+    qboolean        chase_wait;
+    byte            chase_bitmap[MAX_CLIENTS / CHAR_BIT];
 
     mvd_layout_t    layout_type;
     unsigned        layout_time;
@@ -161,8 +167,8 @@ typedef struct mvd_s {
     int             numplayers; // number of active players in frame
     int             clientNum;
     mvd_flags_t     flags;
-    char        layout[MAX_STRING_CHARS];
-    char        oldscores[MAX_STRING_CHARS]; // layout is copied here
+    char        layout[MAX_NET_STRING];
+    char        oldscores[MAX_NET_STRING]; // layout is copied here
     qboolean    intermission;
     qboolean    dirty;
 
@@ -181,6 +187,8 @@ extern qboolean         mvd_dirty;
 
 extern qboolean     mvd_active;
 extern unsigned     mvd_last_activity;
+
+extern jmp_buf  mvd_jmpbuf;
 
 #ifdef _DEBUG
 extern cvar_t    *mvd_shownet;

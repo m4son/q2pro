@@ -88,7 +88,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // game features this server supports
 #define SV_FEATURES (GMF_CLIENTNUM | GMF_PROPERINUSE | GMF_MVDSPEC | \
                      GMF_WANT_ALL_DISCONNECTS | GMF_ENHANCED_SAVEGAMES | \
-                     SV_GMF_VARIABLE_FPS)
+                     SV_GMF_VARIABLE_FPS | GMF_EXTRA_USERINFO)
 
 // ugly hack for SV_Shutdown
 #define MVD_SPAWN_DISABLED  0
@@ -155,6 +155,8 @@ typedef struct {
     int         framenum;
     unsigned    frameresidual;
 
+    char        mapcmd[MAX_QPATH];          // ie: *intro.cin+base
+
     char        name[MAX_QPATH];            // map name, or cinematic name
     cm_t        cm;
     char        *entitystring;
@@ -211,6 +213,7 @@ typedef enum {
 
 #define MSG_RELIABLE    1
 #define MSG_CLEAR       2
+#define MSG_COMPRESS    4
 
 #define MAX_SOUND_PACKET   14
 
@@ -283,6 +286,7 @@ typedef struct client_s {
 
     // usercmd stuff
     unsigned        lastmessage;    // svs.realtime when packet was last received
+    unsigned        lastactivity;   // svs.realtime when user activity was last seen
     int             lastframe;      // for delta compression
     usercmd_t       lastcmd;        // for filling in big drops
     int             command_msec;   // every seconds this is reset, if user
@@ -312,6 +316,8 @@ typedef struct client_s {
     int             downloadsize;   // total bytes (can't use EOF because of paks)
     int             downloadcount;  // bytes sent
     char            *downloadname;  // name of the file
+    int             downloadcmd;    // svc_(z)download
+    qboolean        downloadpending;
 
     // protocol stuff
     int             challenge;  // challenge of this user, randomly generated
@@ -387,8 +393,8 @@ typedef struct {
 
 typedef struct {
     list_t      entry;
-    netadrip_t  addr;
-    uint32_t    mask;
+    netadr_t    addr;
+    netadr_t    mask;
     unsigned    hits;
     time_t      time;   // time of the last hit
     char        comment[1];
@@ -426,6 +432,16 @@ typedef struct {
     time_t last_resolved;
     char name[1];
 } master_t;
+
+typedef struct {
+    char            buffer[MAX_QPATH];
+    char            *server;
+    char            *spawnpoint;
+    server_state_t  state;
+    int             loadgame;
+    qboolean        endofunit;
+    cm_t            cm;
+} mapcmd_t;
 
 #define FOR_EACH_MASTER(m) \
     LIST_FOR_EACH(master_t, m, &sv_masterlist, entry)
@@ -508,6 +524,8 @@ extern cvar_t       *sv_auth_limit;
 extern cvar_t       *sv_rcon_limit;
 extern cvar_t       *sv_uptime;
 
+extern cvar_t       *sv_allow_unconnected_cmds;
+
 extern cvar_t       *g_features;
 
 extern cvar_t       *map_override_path;
@@ -550,7 +568,8 @@ void SV_zfree(voidpf opaque, voidpf address);
 // sv_init.c
 //
 void SV_ClientReset(client_t *client);
-void SV_SpawnServer(cm_t *cm, const char *server, const char *spawnpoint);
+void SV_SpawnServer(mapcmd_t *cmd);
+qboolean SV_ParseMapCmd(mapcmd_t *cmd);
 void SV_InitGame(unsigned mvd_spawn);
 
 //
@@ -668,9 +687,13 @@ void AC_Info_f(void);
 //
 void SV_New_f(void);
 void SV_Begin_f(void);
-void SV_Nextserver(void);
 void SV_ExecuteClientMessage(client_t *cl);
 void SV_CloseDownload(client_t *client);
+#if USE_FPS
+void SV_AlignKeyFrames(client_t *client);
+#else
+#define SV_AlignKeyFrames(client) (void)0
+#endif
 
 //
 // sv_ccmds.c
@@ -708,12 +731,19 @@ void SV_InitEdict(edict_t *e);
 
 void PF_Pmove(pmove_t *pm);
 
-#if USE_CLIENT
 //
 // sv_save.c
 //
-void SV_Savegame_f(void);
-void SV_Loadgame_f(void);
+#if USE_CLIENT
+void SV_AutoSaveBegin(mapcmd_t *cmd);
+void SV_AutoSaveEnd(void);
+void SV_CheckForSavegame(mapcmd_t *cmd);
+void SV_RegisterSavegames(void);
+#else
+#define SV_AutoSaveBegin(cmd)       (void)0
+#define SV_AutoSaveEnd()            (void)0
+#define SV_CheckForSavegame(cmd)    (void)0
+#define SV_RegisterSavegames()      (void)0
 #endif
 
 //============================================================

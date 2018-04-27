@@ -1,6 +1,10 @@
 ### Q2PRO Makefile ###
 
--include .config
+ifneq ($(CONFIG_FILE),)
+    include $(CONFIG_FILE)
+else
+    -include .config
+endif
 
 ifdef CONFIG_WINDOWS
     CPU ?= x86
@@ -29,17 +33,13 @@ RMDIR ?= rm -rf
 MKDIR ?= mkdir -p
 
 CFLAGS ?= -O2 -Wall -g -MMD $(INCLUDES)
-ASFLAGS ?=
 RCFLAGS ?=
 LDFLAGS ?=
 LIBS ?=
 
 CFLAGS_s := -iquote./inc
 CFLAGS_c := -iquote./inc
-CFLAGS_g := -iquote./inc -fno-strict-aliasing
-
-ASFLAGS_s := -iquote./inc
-ASFLAGS_c := -iquote./inc
+CFLAGS_g := -iquote./inc
 
 RCFLAGS_s :=
 RCFLAGS_c :=
@@ -55,24 +55,28 @@ ifdef CONFIG_WINDOWS
         CONFIG_X86_GAME_ABI_HACK := y
     else
         CONFIG_X86_GAME_ABI_HACK :=
-        CONFIG_X86_ASSEMBLY :=
     endif
 
     LDFLAGS_s += -mconsole
     LDFLAGS_c += -mwindows
     LDFLAGS_g += -mconsole
 
-    # Mark images as DEP and ASLR compatible on x86 Windows
+    # Mark images as DEP and ASLR compatible
+    LDFLAGS_s += -Wl,--nxcompat,--dynamicbase
+    LDFLAGS_c += -Wl,--nxcompat,--dynamicbase
+    LDFLAGS_g += -Wl,--nxcompat,--dynamicbase
+
+    # Force relocations to be generated for 32-bit .exe files and work around
+    # binutils bug that causes invalid image entry point to be set when
+    # relocations are enabled.
     ifeq ($(CPU),x86)
-        LDFLAGS_s += -Wl,--nxcompat,--dynamicbase
-        LDFLAGS_c += -Wl,--nxcompat,--dynamicbase
-        LDFLAGS_g += -Wl,--nxcompat,--dynamicbase
+        LDFLAGS_s += -Wl,--pic-executable,--entry,_mainCRTStartup
+        LDFLAGS_c += -Wl,--pic-executable,--entry,_WinMainCRTStartup
     endif
 else
     # Disable x86 features on other arches
     ifneq ($(CPU),i386)
         CONFIG_X86_GAME_ABI_HACK :=
-        CONFIG_X86_ASSEMBLY :=
     endif
 
     # Disable Linux features on other systems
@@ -87,7 +91,7 @@ else
     CFLAGS_g += -fvisibility=hidden
 
     # Resolve all symbols at link time
-    ifneq ($(SYS),OpenBSD)
+    ifeq ($(SYS),Linux)
         LDFLAGS_s += -Wl,--no-undefined
         LDFLAGS_c += -Wl,--no-undefined
         LDFLAGS_g += -Wl,--no-undefined
@@ -260,6 +264,11 @@ ifdef CONFIG_HTTP
     OBJS_c += src/client/http.o
 endif
 
+ifdef CONFIG_CLIENT_GTV
+    CFLAGS_c += -DUSE_CLIENT_GTV=1
+    OBJS_c += src/client/gtv.o
+endif
+
 ifndef CONFIG_NO_SOFTWARE_SOUND
     CFLAGS_c += -DUSE_SNDDMA=1
     OBJS_c += src/client/sound/mix.o
@@ -269,7 +278,15 @@ endif
 ifdef CONFIG_OPENAL
     CFLAGS_c += -DUSE_OPENAL=1
     OBJS_c += src/client/sound/al.o
-    OBJS_c += src/client/sound/qal.o
+    ifdef CONFIG_FIXED_LIBAL
+        AL_CFLAGS ?= $(shell pkg-config openal --cflags)
+        AL_LIBS ?= $(shell pkg-config openal --libs)
+        CFLAGS_c += -DUSE_FIXED_LIBAL=1 $(AL_CFLAGS)
+        LIBS_c += $(AL_LIBS)
+        OBJS_c += src/client/sound/qal/fixed.o
+    else
+        OBJS_c += src/client/sound/qal/dynamic.o
+    endif
 endif
 
 ifndef CONFIG_NO_MENUS
@@ -282,9 +299,6 @@ ifndef CONFIG_NO_MENUS
     OBJS_c += src/client/ui/servers.o
     OBJS_c += src/client/ui/ui.o
 endif
-
-# Light styles are always enabled
-CFLAGS_c += -DUSE_LIGHTSTYLES=1
 
 ifndef CONFIG_NO_DYNAMIC_LIGHTS
     CFLAGS_c += -DUSE_DLIGHTS=1
@@ -318,21 +332,10 @@ ifdef CONFIG_SOFTWARE_RENDERER
     OBJS_c += src/refresh/sw/surf.o
     OBJS_c += src/refresh/sw/sird.o
     OBJS_c += src/refresh/sw/sky.o
-
-    ifdef CONFIG_X86_ASSEMBLY
-        OBJS_c += src/refresh/sw/x86/protect.o
-        OBJS_c += src/refresh/sw/x86/aclip.o
-        OBJS_c += src/refresh/sw/x86/draw.o
-        OBJS_c += src/refresh/sw/x86/edge.o
-        OBJS_c += src/refresh/sw/x86/polyset.o
-        OBJS_c += src/refresh/sw/x86/span16.o
-        OBJS_c += src/refresh/sw/x86/surf8.o
-        OBJS_c += src/refresh/sw/x86/turb8.o
-        OBJS_c += src/refresh/sw/x86/vars.o
-    endif
 else
     CFLAGS_c += -DREF_GL=1 -DUSE_REF=1 -DVID_REF='"gl"'
     OBJS_c += src/refresh/gl/draw.o
+    OBJS_c += src/refresh/gl/hq2x.o
     OBJS_c += src/refresh/gl/images.o
     OBJS_c += src/refresh/gl/main.o
     OBJS_c += src/refresh/gl/mesh.o
@@ -342,7 +345,15 @@ else
     OBJS_c += src/refresh/gl/surf.o
     OBJS_c += src/refresh/gl/tess.o
     OBJS_c += src/refresh/gl/world.o
-    OBJS_c += src/refresh/gl/qgl.o
+    ifdef CONFIG_FIXED_LIBGL
+        GL_CFLAGS ?=
+        GL_LIBS ?= -lGL
+        CFLAGS_c += -DUSE_FIXED_LIBGL=1 $(GL_CFLAGS)
+        LIBS_c += $(GL_LIBS)
+        OBJS_c += src/refresh/gl/qgl/fixed.o
+    else
+        OBJS_c += src/refresh/gl/qgl/dynamic.o
+    endif
 endif
 
 CONFIG_DEFAULT_MODELIST ?= 640x480 800x600 1024x768
@@ -357,21 +368,21 @@ ifndef CONFIG_SOFTWARE_RENDERER
 endif
 
 ifndef CONFIG_NO_TGA
-	CFLAGS_c += -DUSE_TGA=1
+    CFLAGS_c += -DUSE_TGA=1
 endif
 
 ifdef CONFIG_PNG
-	PNG_CFLAGS ?= $(shell libpng-config --cflags)
-	PNG_LIBS ?= $(shell libpng-config --libs)
-	CFLAGS_c += -DUSE_PNG=1 $(PNG_CFLAGS)
-	LIBS_c += $(PNG_LIBS)
+    PNG_CFLAGS ?= $(shell libpng-config --cflags)
+    PNG_LIBS ?= $(shell libpng-config --libs)
+    CFLAGS_c += -DUSE_PNG=1 $(PNG_CFLAGS)
+    LIBS_c += $(PNG_LIBS)
 endif
 
 ifdef CONFIG_JPEG
-	JPG_CFLAGS ?=
-	JPG_LIBS ?= -ljpeg
-	CFLAGS_c += -DUSE_JPG=1 $(JPG_CFLAGS)
-	LIBS_c += $(JPG_LIBS)
+    JPG_CFLAGS ?=
+    JPG_LIBS ?= -ljpeg
+    CFLAGS_c += -DUSE_JPG=1 $(JPG_CFLAGS)
+    LIBS_c += $(JPG_LIBS)
 endif
 
 ifdef CONFIG_ANTICHEAT_SERVER
@@ -472,37 +483,45 @@ ifdef CONFIG_WINDOWS
     LIBS_s += -lws2_32 -lwinmm -ladvapi32
     LIBS_c += -lws2_32 -lwinmm
 else
-    SDL_CFLAGS ?= $(shell sdl-config --cflags)
-    SDL_LIBS ?= $(shell sdl-config --libs)
-    CFLAGS_c += -DUSE_SDL=1 $(SDL_CFLAGS)
-    LIBS_c += $(SDL_LIBS)
-    OBJS_c += src/unix/sdl/video.o
-    OBJS_c += src/unix/sdl/clipboard.o
-
-    ifdef CONFIG_SOFTWARE_RENDERER
-        OBJS_c += src/unix/sdl/swimp.o
+    ifdef CONFIG_SDL2
+        SDL_CFLAGS ?= $(shell sdl2-config --cflags)
+        SDL_LIBS ?= $(shell sdl2-config --libs)
+        CFLAGS_c += -DUSE_SDL=2 $(SDL_CFLAGS)
+        LIBS_c += $(SDL_LIBS)
+        OBJS_c += src/unix/sdl2/video.o
     else
-        OBJS_c += src/unix/sdl/glimp.o
-    endif
+        SDL_CFLAGS ?= $(shell sdl-config --cflags)
+        SDL_LIBS ?= $(shell sdl-config --libs)
+        CFLAGS_c += -DUSE_SDL=1 $(SDL_CFLAGS)
+        LIBS_c += $(SDL_LIBS)
+        OBJS_c += src/unix/sdl/video.o
+        OBJS_c += src/unix/sdl/clipboard.o
 
-    ifdef CONFIG_X11
-        X11_CFLAGS ?=
-        X11_LIBS ?= -lX11
-        CFLAGS_c += -DUSE_X11=1 $(X11_CFLAGS)
-        LIBS_c += $(X11_LIBS)
-        ifndef CONFIG_SOFTWARE_RENDERER
-            OBJS_c += src/unix/sdl/glx.o
+        ifdef CONFIG_SOFTWARE_RENDERER
+            OBJS_c += src/unix/sdl/swimp.o
+        else
+            OBJS_c += src/unix/sdl/glimp.o
         endif
-    endif
 
-    ifdef CONFIG_DIRECT_INPUT
-        CFLAGS_c += -DUSE_DINPUT=1
-        OBJS_c += src/unix/evdev.o
-        ifndef CONFIG_NO_UDEV
-            UDEV_CFLAGS ?=
-            UDEV_LIBS ?= -ludev
-            CFLAGS_c += -DUSE_UDEV=1 $(UDEV_CFLAGS)
-            LIBS_c += $(UDEV_LIBS)
+        ifdef CONFIG_X11
+            X11_CFLAGS ?=
+            X11_LIBS ?= -lX11
+            CFLAGS_c += -DUSE_X11=1 $(X11_CFLAGS)
+            LIBS_c += $(X11_LIBS)
+            ifndef CONFIG_SOFTWARE_RENDERER
+                OBJS_c += src/unix/sdl/glx.o
+            endif
+        endif
+
+        ifdef CONFIG_DIRECT_INPUT
+            CFLAGS_c += -DUSE_DINPUT=1
+            OBJS_c += src/unix/evdev.o
+            ifndef CONFIG_NO_UDEV
+                UDEV_CFLAGS ?=
+                UDEV_LIBS ?= -ludev
+                CFLAGS_c += -DUSE_UDEV=1 $(UDEV_CFLAGS)
+                LIBS_c += $(UDEV_LIBS)
+            endif
         endif
     endif
 
@@ -515,7 +534,11 @@ else
     endif
 
     ifndef CONFIG_NO_SOFTWARE_SOUND
-        OBJS_c += src/unix/sdl/sound.o
+        ifdef CONFIG_SDL2
+            OBJS_c += src/unix/sdl2/sound.o
+        else
+            OBJS_c += src/unix/sdl/sound.o
+        endif
         ifdef CONFIG_DIRECT_SOUND
             CFLAGS_c += -DUSE_DSOUND=1
             OBJS_c += src/unix/oss.o
@@ -553,19 +576,6 @@ ifdef CONFIG_DEBUG
     CFLAGS_s += -D_DEBUG
 endif
 
-ifdef CONFIG_X86_ASSEMBLY
-    ASFLAGS_c += -DUSE_ASM=1
-    ASFLAGS_s += -DUSE_ASM=1
-    ifdef CONFIG_WINDOWS
-        ASFLAGS_c += -DUNDERSCORES
-        ASFLAGS_s += -DUNDERSCORES
-    endif
-    CFLAGS_c += -DUSE_ASM=1
-    CFLAGS_s += -DUSE_ASM=1
-    OBJS_c += src/common/x86/math.o
-    OBJS_s += src/common/x86/math.o
-endif
-
 ifeq ($(CPU),x86)
     OBJS_c += src/common/x86/fpu.o
     OBJS_s += src/common/x86/fpu.o
@@ -592,7 +602,7 @@ all: $(TARG_s) $(TARG_c) $(TARG_g)
 
 default: all
 
-.PHONY: clean
+.PHONY: all default clean strip
 
 # Define V=1 to show command line.
 ifdef V
@@ -637,11 +647,6 @@ $(BUILD_s)/%.o: %.c
 	$(Q)$(MKDIR) $(@D)
 	$(Q)$(CC) -c $(CFLAGS) $(CFLAGS_s) -o $@ $<
 
-$(BUILD_s)/%.o: %.S
-	$(E) [AS] $@
-	$(Q)$(MKDIR) $(@D)
-	$(Q)$(CC) -c $(ASFLAGS) $(ASFLAGS_s) -o $@ $<
-
 $(BUILD_s)/%.o: %.rc
 	$(E) [RC] $@
 	$(Q)$(MKDIR) $(@D)
@@ -658,11 +663,6 @@ $(BUILD_c)/%.o: %.c
 	$(E) [CC] $@
 	$(Q)$(MKDIR) $(@D)
 	$(Q)$(CC) -c $(CFLAGS) $(CFLAGS_c) -o $@ $<
-
-$(BUILD_c)/%.o: %.S
-	$(E) [AS] $@
-	$(Q)$(MKDIR) $(@D)
-	$(Q)$(CC) -c $(ASFLAGS) $(ASFLAGS_c) -o $@ $<
 
 $(BUILD_c)/%.o: %.rc
 	$(E) [RC] $@

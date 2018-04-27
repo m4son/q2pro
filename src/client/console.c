@@ -71,6 +71,8 @@ typedef struct console_s {
     consoleMode_t mode;
     netadr_t remoteAddress;
     char *remotePassword;
+
+    load_state_t loadstate;
 } console_t;
 
 static console_t    con;
@@ -121,7 +123,12 @@ if user has typed something into it since the last call to Con_Popup.
 */
 void Con_Close(qboolean force)
 {
-    if (con.mode && !force) {
+    if (con.mode > CON_POPUP && !force) {
+        return;
+    }
+
+    // if not connected, console or menu should be up
+    if (cls.state < ca_active && !(cls.key_dest & KEY_MENU)) {
         return;
     }
 
@@ -131,7 +138,7 @@ void Con_Close(qboolean force)
     Key_SetDest(cls.key_dest & ~KEY_CONSOLE);
 
     con.destHeight = con.currentHeight = 0;
-    con.mode = CON_DEFAULT;
+    con.mode = CON_POPUP;
     con.chat = CHAT_NONE;
 }
 
@@ -139,12 +146,12 @@ void Con_Close(qboolean force)
 ================
 Con_Popup
 
-Drop to connection screen.
+Drop to connection screen. Unless `force' is true, does not change console mode to popup.
 ================
 */
-void Con_Popup(void)
+void Con_Popup(qboolean force)
 {
-    if (con.mode == CON_DEFAULT) {
+    if (force) {
         con.mode = CON_POPUP;
     }
 
@@ -168,7 +175,7 @@ static void toggle_console(consoleMode_t mode, chatMode_t chat)
 
     if (cls.key_dest & KEY_CONSOLE) {
         Key_SetDest(cls.key_dest & ~KEY_CONSOLE);
-        con.mode = CON_DEFAULT;
+        con.mode = CON_POPUP;
         con.chat = CHAT_NONE;
         return;
     }
@@ -286,7 +293,10 @@ static void start_message_mode(chatMode_t mode)
         return;
     }
 
-    Con_Close(qtrue);
+    // starting messagemode closes console
+    if (cls.key_dest & KEY_CONSOLE) {
+        Con_Close(qtrue);
+    }
 
     con.chat = mode;
     IF_Replace(&con.chatPrompt.inputLine, Cmd_RawArgs());
@@ -354,17 +364,16 @@ Con_CheckResize
 If the line width has changed, reformat the buffer.
 ================
 */
-static void Con_CheckResize(void)
+void Con_CheckResize(void)
 {
     int     width;
+
+    con.scale = R_ClampScale(con_scale);
 
     con.vidWidth = r_config.width * con.scale;
     con.vidHeight = r_config.height * con.scale;
 
     width = (con.vidWidth / CHAR_WIDTH) - 2;
-
-    if (width == con.linewidth)
-        return;
 
     con.linewidth = width > CON_LINEWIDTH ? CON_LINEWIDTH : width;
     con.prompt.inputLine.visibleChars = con.linewidth;
@@ -395,6 +404,13 @@ static void con_param_changed(cvar_t *self)
 {
     if (con.initialized && cls.ref_initialized) {
         Con_RegisterMedia();
+    }
+}
+
+static void con_scale_changed(cvar_t *self)
+{
+    if (con.initialized && cls.ref_initialized) {
+        Con_CheckResize();
     }
 }
 
@@ -432,7 +448,8 @@ void Con_Init(void)
     con_height = Cvar_Get("con_height", "0.5", 0);
     con_speed = Cvar_Get("scr_conspeed", "3", 0);
     con_alpha = Cvar_Get("con_alpha", "1", 0);
-    con_scale = Cvar_Get("con_scale", "1", 0);
+    con_scale = Cvar_Get("con_scale", "0", 0);
+    con_scale->changed = con_scale_changed;
     con_font = Cvar_Get("con_font", "conchars", 0);
     con_font->changed = con_param_changed;
     con_background = Cvar_Get("con_background", "conback", 0);
@@ -514,6 +531,18 @@ static void Con_Linefeed(void)
 void Con_SetColor(color_index_t color)
 {
     con.color = color;
+}
+
+/*
+=================
+CL_LoadState
+=================
+*/
+void CL_LoadState(load_state_t state)
+{
+    con.loadstate = state;
+    SCR_UpdateScreen();
+    VID_PumpEvents();
 }
 
 /*
@@ -663,7 +692,7 @@ static int Con_DrawLine(int v, int line, float alpha)
                         con.charsetImage);
 }
 
-#define CON_PRESTEP     (10 + CHAR_HEIGHT * 2)
+#define CON_PRESTEP     (CHAR_HEIGHT * 3 + CHAR_HEIGHT / 4)
 
 /*
 ================
@@ -752,7 +781,6 @@ static void Con_DrawSolidConsole(void)
     char            buffer[CON_LINEWIDTH];
     int             vislines;
     float           alpha;
-    clipRect_t      clip;
     int             widths[2];
 
     vislines = con.vidHeight * con.currentHeight;
@@ -763,29 +791,16 @@ static void Con_DrawSolidConsole(void)
         vislines = con.vidHeight;
 
 // setup transparency
-    if (cls.state == ca_active &&
-        con_alpha->value &&
-        (cls.key_dest & KEY_MENU) == 0) {
+    if (cls.state >= ca_active && !(cls.key_dest & KEY_MENU) && con_alpha->value) {
         alpha = 0.5f + 0.5f * (con.currentHeight / con_height->value);
         R_SetAlpha(alpha * Cvar_ClampValue(con_alpha, 0, 1));
     }
 
-    clip.left = 0;
-    clip.top = 0;
-    clip.right = 0;
-    clip.bottom = 0;
-    R_SetClipRect(DRAW_CLIP_TOP, &clip);
-
 // draw the background
-    if (cls.state != ca_active || (cls.key_dest & KEY_MENU) || con_alpha->value) {
+    if (cls.state < ca_active || (cls.key_dest & KEY_MENU) || con_alpha->value) {
         R_DrawStretchPic(0, vislines - con.vidHeight,
                          con.vidWidth, con.vidHeight, con.backImage);
     }
-#if 0
-    if (cls.state > ca_disconnected && cls.state < ca_active) {
-        R_DrawFill(0, vislines, con.vidWidth, con.vidHeight - vislines, 0);
-    }
-#endif
 
 // draw the text
     y = vislines - CON_PRESTEP;
@@ -823,9 +838,7 @@ static void Con_DrawSolidConsole(void)
 
     R_ClearColor();
 
-//ZOID
     // draw the download bar
-    // figure out width
     if (cls.download.current) {
         int n, j;
 
@@ -834,11 +847,12 @@ static void Con_DrawSolidConsole(void)
         else
             text = cls.download.current->path;
 
-        x = con.linewidth - ((con.linewidth * 7) / 40);
-        y = x - strlen(text) - 8;
-        i = con.linewidth / 3;
+        // figure out width
+        x = con.linewidth;
+        y = x - strlen(text) - 18;
+        i = x / 3;
         if (strlen(text) > i) {
-            y = x - i - 11;
+            y = x - i - 21;
             strncpy(buffer, text, i);
             buffer[i] = 0;
             strcat(buffer, "...");
@@ -860,13 +874,43 @@ static void Con_DrawSolidConsole(void)
         buffer[i++] = '\x82';
         buffer[i] = 0;
 
-        sprintf(buffer + i, " %02d%%", cls.download.percent);
+        Q_snprintf(buffer + i, sizeof(buffer) - i, " %02d%% (%d kB)",
+                   cls.download.percent, cls.download.position / 1000);
 
         // draw it
-        y = vislines - 10;
+        y = vislines - CON_PRESTEP + CHAR_HEIGHT * 2;
         R_DrawString(CHAR_WIDTH, y, 0, CON_LINEWIDTH, buffer, con.charsetImage);
+    } else if (cls.state == ca_loading) {
+        // draw loading state
+        switch (con.loadstate) {
+        case LOAD_MAP:
+            text = cl.configstrings[CS_MODELS + 1];
+            break;
+        case LOAD_MODELS:
+            text = "models";
+            break;
+        case LOAD_IMAGES:
+            text = "images";
+            break;
+        case LOAD_CLIENTS:
+            text = "clients";
+            break;
+        case LOAD_SOUNDS:
+            text = "sounds";
+            break;
+        default:
+            text = NULL;
+            break;
+        }
+
+        if (text) {
+            Q_snprintf(buffer, sizeof(buffer), "Loading %s...", text);
+
+            // draw it
+            y = vislines - CON_PRESTEP + CHAR_HEIGHT * 2;
+            R_DrawString(CHAR_WIDTH, y, 0, CON_LINEWIDTH, buffer, con.charsetImage);
+        }
     }
-//ZOID
 
 // draw the input prompt, user text, and cursor if desired
     x = 0;
@@ -924,7 +968,6 @@ static void Con_DrawSolidConsole(void)
 
     // restore rendering parameters
     R_ClearColor();
-    R_SetClipRect(DRAW_CLIP_DISABLED, NULL);
 }
 
 //=============================================================================
@@ -963,6 +1006,11 @@ void Con_RunConsole(void)
         con.destHeight = 0;             // none visible
     }
 
+    if (con_speed->value <= 0) {
+        con.currentHeight = con.destHeight;
+        return;
+    }
+
     if (con.currentHeight > con.destHeight) {
         con.currentHeight -= con_speed->value * cls.frametime;
         if (con.currentHeight < con.destHeight) {
@@ -983,16 +1031,10 @@ SCR_DrawConsole
 */
 void Con_DrawConsole(void)
 {
-    Cvar_ClampValue(con_scale, 1, 9);
-
-    con.scale = 1.0f / con_scale->value;
-    R_SetScale(&con.scale);
-
-    Con_CheckResize();
+    R_SetScale(con.scale);
     Con_DrawSolidConsole();
     Con_DrawNotify();
-
-    R_SetScale(NULL);
+    R_SetScale(1.0f);
 }
 
 
@@ -1012,7 +1054,7 @@ static void Con_Say(char *msg)
 // don't close console after connecting
 static void Con_InteractiveMode(void)
 {
-    if (!con.mode) {
+    if (con.mode == CON_POPUP) {
         con.mode = CON_DEFAULT;
     }
 }

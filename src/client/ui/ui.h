@@ -33,7 +33,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define UI_Mallocz(s)       Z_TagMallocz(s, TAG_UI)
 #define UI_CopyString(s)    Z_TagCopyString(s, TAG_UI)
 
-#define MAXMENUITEMS    64
+#define MIN_MENU_ITEMS  64
+#define MAX_MENU_ITEMS  250000000
 
 typedef enum {
     MTYPE_BAD,
@@ -50,7 +51,9 @@ typedef enum {
     MTYPE_TOGGLE,
     MTYPE_STATIC,
     MTYPE_KEYBIND,
-    MTYPE_BITMAP
+    MTYPE_BITMAP,
+    MTYPE_SAVEGAME,
+    MTYPE_LOADGAME
 } menuType_t;
 
 #define QMF_LEFT_JUSTIFY    0x00000001
@@ -91,9 +94,10 @@ typedef struct menuFrameWork_s {
 
     char    *name, *title, *status;
 
+    void    **items;
     int     nitems;
-    void    *items[MAXMENUITEMS];
 
+    qboolean compact;
     qboolean transparent;
     qboolean keywait;
 
@@ -155,6 +159,7 @@ typedef struct menuField_s {
 typedef struct menuSlider_s {
     menuCommon_t generic;
     cvar_t *cvar;
+    qboolean modified;
 
     float minvalue;
     float maxvalue;
@@ -172,6 +177,7 @@ typedef struct menuSlider_s {
 
 #define MLF_HEADER      0x00000001
 #define MLF_SCROLLBAR   0x00000002
+#define MLF_COLOR       0x00000004
 
 typedef struct menuListColumn_s {
     char *name;
@@ -195,6 +201,8 @@ typedef struct menuList_s {
     char    scratch[8];
     int     scratchCount;
     int     scratchTime;
+
+    int     drag_y;
 
     menuListColumn_t    columns[MAX_COLUMNS];
     int                 numcolumns;
@@ -241,6 +249,7 @@ typedef struct menuKeybind_s {
     char            binding[32];
     char            altbinding[32];
     char            *cmd;
+    char            *altstatus;
 } menuKeybind_t;
 
 #define MAX_PLAYERMODELS 1024
@@ -265,15 +274,15 @@ void PlayerModel_Free(void);
 typedef struct uiStatic_s {
     qboolean initialized;
     int realtime;
-    clipRect_t clipRect;
     int width, height; // scaled
     float scale;
     int menuDepth;
     menuFrameWork_t *layers[MAX_MENU_DEPTH];
     menuFrameWork_t *activeMenu;
+    menuCommon_t *mouseTracker;
     int mouseCoords[2];
     qboolean entersound;        // play after drawing a frame, so caching
-    // won't disrupt the sound
+                                // won't disrupt the sound
     qboolean transparent;
     int numPlayerModels;
     playerModelInfo_t pmi[MAX_PLAYERMODELS];

@@ -34,7 +34,6 @@ byte        r_warpbuffer[WARP_WIDTH * WARP_HEIGHT * VID_BYTES];
 
 float       r_time1;
 int         r_numallocatededges;
-float       r_aliasuvscale = 1.0;
 int         r_outofsurfaces;
 int         r_outofedges;
 
@@ -56,16 +55,6 @@ vec3_t  r_origin;
 // screen size info
 //
 oldrefdef_t r_refdef;
-float       xcenter, ycenter;
-float       xscale, yscale;
-float       xscaleinv, yscaleinv;
-float       xscaleshrink, yscaleshrink;
-float       aliasxscale, aliasyscale, aliasxcenter, aliasycenter;
-
-int     r_screenrowbytes;
-
-float   verticalFieldOfView;
-float   xOrigin, yOrigin;
 
 cplane_t    screenedge[4];
 
@@ -74,7 +63,6 @@ cplane_t    screenedge[4];
 //
 int     r_framecount = 1;   // so frame counts initialized to 0 don't match
 int     r_visframecount;
-int     d_spanpixcount;
 int     r_polycount;
 int     r_drawnpolycount;
 int     r_wholepolycount;
@@ -85,13 +73,7 @@ int         r_frustum_indexes[4 * 6];
 mleaf_t     *r_viewleaf;
 int         r_viewcluster, r_oldviewcluster;
 
-float   da_time1, da_time2, dp_time1, dp_time2, db_time1, db_time2, rw_time1, rw_time2;
-float   se_time1, se_time2, de_time1, de_time2;
-
-void R_MarkLeaves(void);
-
 cvar_t  *sw_aliasstats;
-cvar_t  *sw_allow_modex;
 cvar_t  *sw_clearcolor;
 cvar_t  *sw_drawflat;
 cvar_t  *sw_draworder;
@@ -99,11 +81,11 @@ cvar_t  *sw_maxedges;
 cvar_t  *sw_maxsurfs;
 cvar_t  *sw_reportedgeout;
 cvar_t  *sw_reportsurfout;
-cvar_t  *sw_stipplealpha;
 cvar_t  *sw_surfcacheoverride;
 cvar_t  *sw_waterwarp;
 cvar_t  *sw_dynamic;
 cvar_t  *sw_modulate;
+cvar_t  *sw_lockpvs;
 
 //Start Added by Lewey
 // These flags allow you to turn SIRDS on and
@@ -113,7 +95,6 @@ cvar_t  *sw_drawsird;
 
 cvar_t  *r_drawworld;
 cvar_t  *r_drawentities;
-cvar_t  *r_dspeeds;
 cvar_t  *r_fullbright;
 cvar_t  *r_lerpmodels;
 cvar_t  *r_novis;
@@ -121,16 +102,6 @@ cvar_t  *r_novis;
 cvar_t  *r_speeds;
 
 cvar_t  *vid_gamma;
-
-//PGM
-cvar_t  *sw_lockpvs;
-//PGM
-
-#if USE_ASM
-
-void            *d_pcolormap;
-
-#else // USE_ASM
 
 // all global and static refresh variables are collected in a contiguous block
 // to avoid cache conflicts.
@@ -150,16 +121,18 @@ fixed16_t   sadjust, tadjust, bbextents, bbextentt;
 
 pixel_t         *cacheblock;
 int             cachewidth;
-pixel_t         *d_viewbuffer;
-short           *d_pzbuffer;
-unsigned int    d_zrowbytes;
-unsigned int    d_zwidth;
 
-#endif  // !USE_ASM
+pixel_t     *d_viewbuffer;
+int         d_screenrowbytes;
+short       *d_pzbuffer;
+int         d_zrowbytes;
+int         d_zwidth;
+byte        *d_spantable[MAXHEIGHT];
+short       *d_zspantable[MAXHEIGHT];
 
 int     sintable[CYCLE * 2];
 int     intsintable[CYCLE * 2];
-int     blanktable[CYCLE * 2];      // PGM
+int     blanktable[CYCLE * 2];
 
 /*
 ================
@@ -173,29 +146,26 @@ void R_InitTurb(void)
     for (i = 0; i < CYCLE * 2; i++) {
         sintable[i] = AMP + sin(i * M_PI * 2 / CYCLE) * AMP;
         intsintable[i] = AMP2 + sin(i * M_PI * 2 / CYCLE) * AMP2; // AMP2, not 20
-        blanktable[i] = 0;          //PGM
+        blanktable[i] = 0;
     }
 }
 
-void D_SCDump_f(void);
-
-void R_Register(void)
+static void R_Register(void)
 {
     sw_aliasstats = Cvar_Get("sw_polymodelstats", "0", 0);
-    sw_allow_modex = Cvar_Get("sw_allow_modex", "1", CVAR_ARCHIVE);
     sw_clearcolor = Cvar_Get("sw_clearcolor", "2", 0);
     sw_drawflat = Cvar_Get("sw_drawflat", "0", CVAR_CHEAT);
     sw_draworder = Cvar_Get("sw_draworder", "0", CVAR_CHEAT);
-    sw_maxedges = Cvar_Get("sw_maxedges", va("%i", NUMSTACKEDGES), 0);
-    sw_maxsurfs = Cvar_Get("sw_maxsurfs", va("%i", NUMSTACKSURFACES), 0);
+    sw_maxedges = Cvar_Get("sw_maxedges", STRINGIFY(NUMSTACKEDGES), 0);
+    sw_maxsurfs = Cvar_Get("sw_maxsurfs", STRINGIFY(NUMSTACKSURFACES), 0);
     sw_mipcap = Cvar_Get("sw_mipcap", "0", 0);
     sw_mipscale = Cvar_Get("sw_mipscale", "1", 0);
     sw_reportedgeout = Cvar_Get("sw_reportedgeout", "0", 0);
     sw_reportsurfout = Cvar_Get("sw_reportsurfout", "0", 0);
-    sw_stipplealpha = Cvar_Get("sw_stipplealpha", "0", CVAR_ARCHIVE);
     sw_waterwarp = Cvar_Get("sw_waterwarp", "1", 0);
     sw_dynamic = Cvar_Get("sw_dynamic", "1", 0);
     sw_modulate = Cvar_Get("sw_modulate", "1", 0);
+    sw_lockpvs = Cvar_Get("sw_lockpvs", "0", 0);
 
     //Start Added by Lewey
     sw_drawsird = Cvar_Get("sw_drawsird", "0", 0);
@@ -205,21 +175,15 @@ void R_Register(void)
     r_fullbright = Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
     r_drawentities = Cvar_Get("r_drawentities", "1", 0);
     r_drawworld = Cvar_Get("r_drawworld", "1", CVAR_CHEAT);
-    r_dspeeds = Cvar_Get("r_dspeeds", "0", 0);
     r_lerpmodels = Cvar_Get("r_lerpmodels", "1", 0);
     r_novis = Cvar_Get("r_novis", "0", 0);
 
     vid_gamma = Cvar_Get("vid_gamma", "1.0", CVAR_ARCHIVE | CVAR_FILES);
 
     Cmd_AddCommand("scdump", D_SCDump_f);
-
-//PGM
-    sw_lockpvs = Cvar_Get("sw_lockpvs", "0", 0);
-//PGM
-
 }
 
-void R_UnRegister(void)
+static void R_UnRegister(void)
 {
     Cmd_RemoveCommand("scdump");
 }
@@ -231,9 +195,17 @@ void R_ModeChanged(int width, int height, int flags, int rowbytes, void *pixels)
     vid.buffer = pixels;
     vid.rowbytes = rowbytes;
 
+    if (width > MAXWIDTH)
+        vid.buffer += (width - MAXWIDTH) * VID_BYTES / 2;
+
+    if (height > MAXHEIGHT)
+        vid.buffer += (height - MAXHEIGHT) * rowbytes / 2;
+
     r_config.width = vid.width;
     r_config.height = vid.height;
     r_config.flags = flags;
+
+    R_SetClipRect(NULL);
 
     sw_surfcacheoverride = Cvar_Get("sw_surfcacheoverride", "0", 0);
 
@@ -248,6 +220,8 @@ void R_ModeChanged(int width, int height, int flags, int rowbytes, void *pixels)
     R_FreeCaches();
 
     d_pzbuffer = R_Mallocz(vid.width * vid.height * 2);
+    d_zrowbytes = vid.width * 2;
+    d_zwidth = vid.width;
 
     R_InitCaches();
 }
@@ -270,24 +244,16 @@ qboolean R_Init(qboolean total)
 
     Com_DPrintf("ref_soft " VERSION ", " __DATE__ "\n");
 
-#if USE_ASM
-    Sys_MakeCodeWriteable((uintptr_t)R_EdgeCodeStart,
-                          (uintptr_t)R_EdgeCodeEnd - (uintptr_t)R_EdgeCodeStart);
-#endif
-
-    r_aliasuvscale = 1.0;
-
     // create the window
-    if (!VID_Init()) {
+    if (!VID_Init())
         return qfalse;
-    }
 
     R_Register();
 
     IMG_Init();
+
     MOD_Init();
 
-    /* get the palette before we create the window */
     R_InitImages();
 
     R_InitSkyBox();
@@ -295,14 +261,11 @@ qboolean R_Init(qboolean total)
     view_clipplanes[0].leftedge = qtrue;
     view_clipplanes[1].rightedge = qtrue;
     view_clipplanes[1].leftedge =
-        view_clipplanes[2].leftedge =
-            view_clipplanes[3].leftedge = qfalse;
+    view_clipplanes[2].leftedge =
+    view_clipplanes[3].leftedge = qfalse;
     view_clipplanes[0].rightedge =
-        view_clipplanes[2].rightedge =
-            view_clipplanes[3].rightedge = qfalse;
-
-    r_refdef.xOrigin = XCENTERING;
-    r_refdef.yOrigin = YCENTERING;
+    view_clipplanes[2].rightedge =
+    view_clipplanes[3].rightedge = qfalse;
 
     R_InitTurb();
 
@@ -388,7 +351,6 @@ void R_NewMap(void)
         // surface 0 doesn't really exist; it's just a dummy because index 0
         // is used to indicate no edge attached to surface
         surfaces--;
-        R_SurfacePatch();
     }
 
     r_maxedgesseen = 0;
@@ -410,7 +372,7 @@ Mark the leaves and nodes that are in the PVS for the current
 cluster
 ===============
 */
-void R_MarkLeaves(void)
+static void R_MarkLeaves(void)
 {
     byte    vis[VIS_MAX_BYTES];
     mnode_t *node;
@@ -541,7 +503,7 @@ static void R_DrawEntitiesOnList(void)
 R_BmodelCheckBBox
 =============
 */
-int R_BmodelCheckBBox(float *minmaxs)
+static int R_BmodelCheckBBox(float *minmaxs)
 {
     int         i, *pindex, clipflags;
     vec3_t      acceptpt, rejectpt;
@@ -588,28 +550,28 @@ R_FindTopnode
 Find the first node that splits the given box
 ===================
 */
-mnode_t *R_FindTopnode(vec3_t mins, vec3_t maxs)
+static mnode_t *R_FindTopnode(vec3_t mins, vec3_t maxs)
 {
     int         sides;
-    mnode_t *node;
+    mnode_t     *node;
 
     node = r_worldmodel->nodes;
 
     while (node->visframe == r_visframecount) {
         if (!node->plane) {
             if (((mleaf_t *)node)->contents != CONTENTS_SOLID)
-                return node; // we've reached a non-solid leaf, so it's
-            //  visible and not BSP clipped
+                return node;    // we've reached a non-solid leaf, so it's
+                                // visible and not BSP clipped
             return NULL;    // in solid, so not visible
         }
 
         sides = BoxOnPlaneSideFast(mins, maxs, node->plane);
 
-        if (sides == 3)
+        if (sides == BOX_INTERSECTS)
             return node;    // this is the splitter
 
         // not split yet; recurse down the contacted side
-        if (sides & 1)
+        if (sides & BOX_INFRONT)
             node = node->children[0];
         else
             node = node->children[1];
@@ -626,8 +588,8 @@ RotatedBBox
 Returns an axially aligned box that contains the input box at the given rotation
 =============
 */
-void RotatedBBox(vec3_t mins, vec3_t maxs, vec3_t angles,
-                 vec3_t tmins, vec3_t tmaxs)
+static void RotatedBBox(vec3_t mins, vec3_t maxs, vec3_t angles,
+                        vec3_t tmins, vec3_t tmaxs)
 {
     vec3_t  tmp, v;
     int     i, j;
@@ -681,7 +643,7 @@ void RotatedBBox(vec3_t mins, vec3_t maxs, vec3_t angles,
 R_DrawBEntitiesOnList
 =============
 */
-void R_DrawBEntitiesOnList(void)
+static void R_DrawBEntitiesOnList(void)
 {
     int         i, index, clipflags;
     vec3_t      oldorigin;
@@ -735,7 +697,7 @@ void R_DrawBEntitiesOnList(void)
         R_RotateBmodel();
 
         // calculate dynamic lighting for bmodel
-        R_PushDlights(model->headnode);
+        R_MarkLights(model->headnode);
 
         if (topnode->plane) {
             // not a leaf; has to be clipped to the world BSP
@@ -766,7 +728,7 @@ void R_DrawBEntitiesOnList(void)
 R_EdgeDrawing
 ================
 */
-void R_EdgeDrawing(void)
+static void R_EdgeDrawing(void)
 {
     edge_t  ledges[NUMSTACKEDGES +
                    ((CACHE_SIZE - 1) / sizeof(edge_t)) + 1];
@@ -790,35 +752,20 @@ void R_EdgeDrawing(void)
         // surface 0 doesn't really exist; it's just a dummy because index 0
         // is used to indicate no edge attached to surface
         surfaces--;
-        R_SurfacePatch();
     }
 
     R_BeginEdgeFrame();
 
-    if (r_dspeeds->integer) {
-        rw_time1 = Sys_Milliseconds();
-    }
-
     R_RenderWorld();
 
-    if (r_dspeeds->integer) {
-        rw_time2 = Sys_Milliseconds();
-        db_time1 = rw_time2;
-    }
-
     R_DrawBEntitiesOnList();
-
-    if (r_dspeeds->integer) {
-        db_time2 = Sys_Milliseconds();
-        se_time1 = db_time2;
-    }
 
     R_ScanEdges();
 }
 
 //=======================================================================
 
-byte *IMG_ReadPixels(qboolean reverse, int *width, int *height)
+byte *IMG_ReadPixels(int *width, int *height, int *rowbytes)
 {
     byte *pixels;
     byte *src, *dst;
@@ -829,28 +776,18 @@ byte *IMG_ReadPixels(qboolean reverse, int *width, int *height)
     src = vid.buffer + vid.rowbytes * (vid.height - 1);
     dst = pixels;
 
-    if (reverse) {
-        for (y = 0; y < vid.height; y++, src -= vid.rowbytes) {
-            for (x = 0; x < vid.width; x++) {
-                dst[0] = src[x * VID_BYTES + 0];
-                dst[1] = src[x * VID_BYTES + 1];
-                dst[2] = src[x * VID_BYTES + 2];
-                dst += 3;
-            }
-        }
-    } else {
-        for (y = 0; y < vid.height; y++, src -= vid.rowbytes) {
-            for (x = 0; x < vid.width; x++) {
-                dst[0] = src[x * VID_BYTES + 2];
-                dst[1] = src[x * VID_BYTES + 1];
-                dst[2] = src[x * VID_BYTES + 0];
-                dst += 3;
-            }
+    for (y = 0; y < vid.height; y++, src -= vid.rowbytes) {
+        for (x = 0; x < vid.width; x++) {
+            dst[0] = src[x * VID_BYTES + 2];
+            dst[1] = src[x * VID_BYTES + 1];
+            dst[2] = src[x * VID_BYTES + 0];
+            dst += 3;
         }
     }
 
     *width = vid.width;
     *height = vid.height;
+    *rowbytes = vid.width * 3;
 
     return pixels;
 }
@@ -870,13 +807,10 @@ void R_RenderFrame(refdef_t *fd)
     if (!r_worldmodel && !(r_newrefdef.rdflags & RDF_NOWORLDMODEL))
         Com_Error(ERR_FATAL, "R_RenderView: NULL worldmodel");
 
-    VectorCopy(fd->vieworg, r_refdef.vieworg);
-    VectorCopy(fd->viewangles, r_refdef.viewangles);
-
     if (!sw_dynamic->integer)
         r_newrefdef.num_dlights = 0;
 
-    if (r_speeds->integer || r_dspeeds->integer)
+    if (r_speeds->integer)
         r_time1 = Sys_Milliseconds();
 
     R_SetupFrame();
@@ -884,26 +818,13 @@ void R_RenderFrame(refdef_t *fd)
     R_MarkLeaves();     // done here so we know if we're in water
 
     if (r_worldmodel)
-        R_PushDlights(r_worldmodel->nodes);
+        R_MarkLights(r_worldmodel->nodes);
 
     R_EdgeDrawing();
 
-    if (r_dspeeds->integer) {
-        se_time2 = Sys_Milliseconds();
-        de_time1 = se_time2;
-    }
-
     R_DrawEntitiesOnList();
 
-    if (r_dspeeds->integer) {
-        de_time2 = Sys_Milliseconds();
-        dp_time1 = Sys_Milliseconds();
-    }
-
     R_DrawParticles();
-
-    if (r_dspeeds->integer)
-        dp_time2 = Sys_Milliseconds();
 
     R_DrawAlphaSurfaces();
 
@@ -918,20 +839,11 @@ void R_RenderFrame(refdef_t *fd)
     }
     //End Replaced by Lewey
 
-    if (r_dspeeds->integer)
-        da_time1 = Sys_Milliseconds();
-
-    if (r_dspeeds->integer)
-        da_time2 = Sys_Milliseconds();
-
     if (sw_aliasstats->integer)
         R_PrintAliasStats();
 
     if (r_speeds->integer)
         R_PrintTimes();
-
-    if (r_dspeeds->integer)
-        R_PrintDSpeeds();
 
     if (sw_reportsurfout->integer && r_outofsurfaces)
         Com_Printf("Short %d surfaces\n", r_outofsurfaces);
@@ -987,8 +899,8 @@ void R_DrawBeam(entity_t *e)
     VectorScale(perpvec, e->frame / 2, perpvec);
 
     for (i = 0; i < NUM_BEAM_SEGS; i++) {
-        R_RotatePointAroundVector(start_points[i], normalized_direction,
-                                  perpvec, (360.0 / NUM_BEAM_SEGS)*i);
+        RotatePointAroundVector(start_points[i], normalized_direction,
+                                perpvec, (360.0f / NUM_BEAM_SEGS) * i);
         VectorAdd(start_points[i], origin, start_points[i]);
         VectorAdd(start_points[i], direction, end_points[i]);
     }

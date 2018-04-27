@@ -34,8 +34,9 @@ static inline void CL_ParseDeltaEntity(server_frame_t  *frame,
 {
     entity_state_t    *state;
 
-    if (frame->numEntities >= MAX_PACKET_ENTITIES) {
-        Com_Error(ERR_DROP, "%s: MAX_PACKET_ENTITIES exceeded", __func__);
+    // suck up to MAX_EDICTS for servers that don't cap at MAX_PACKET_ENTITIES
+    if (frame->numEntities >= MAX_EDICTS) {
+        Com_Error(ERR_DROP, "%s: MAX_EDICTS exceeded", __func__);
     }
 
     state = &cl.entityStates[cl.numEntityStates & PARSE_ENTITIES_MASK];
@@ -198,7 +199,6 @@ static void CL_ParseFrame(int extrabits)
 
     cl.frameflags = 0;
 
-    suppressed = 0;
     extraflags = 0;
     if (cls.serverProtocol > PROTOCOL_VERSION_DEFAULT) {
         bits = MSG_ReadLong();
@@ -424,7 +424,6 @@ static void CL_ParseConfigstring(int index)
         Com_WPrintf(
             "%s: index %d overflowed: %"PRIz" > %"PRIz"\n",
             __func__, index, len, maxlen - 1);
-        len = maxlen - 1;
     }
 
     if (cls.demo.seeking) {
@@ -545,6 +544,9 @@ static void CL_ParseServerData(void)
     cl.framediv = 1;
 #endif
 
+    // setup default server state
+    cl.serverstate = ss_game;
+
     if (cls.serverProtocol == PROTOCOL_VERSION_R1Q2) {
         i = MSG_ReadByte();
         if (i) {
@@ -583,7 +585,11 @@ static void CL_ParseServerData(void)
         }
         Com_DPrintf("Using minor Q2PRO protocol version %d\n", i);
         cls.protocolVersion = i;
-        MSG_ReadByte(); // used to be gametype
+        i = MSG_ReadByte();
+        if (cls.protocolVersion >= PROTOCOL_VERSION_Q2PRO_SERVER_STATE) {
+            Com_DPrintf("Q2PRO server state %d\n", i);
+            cl.serverstate = i;
+        }
         i = MSG_ReadByte();
         if (i) {
             Com_DPrintf("Q2PRO strafejump hack enabled\n");
@@ -617,8 +623,7 @@ static void CL_ParseServerData(void)
     }
 
     if (cl.clientNum == -1) {
-        // tell the server to advance to the next map / cinematic
-        CL_ClientCommand(va("nextserver %i\n", cl.servercount));
+        SCR_PlayCinematic(levelname);
     } else {
         // seperate the printfs so the server message can have a color
         Con_Printf(
@@ -931,7 +936,7 @@ static void CL_ParsePrint(void)
 
     if (level != PRINT_CHAT) {
         Com_Printf("%s", s);
-        if (!cls.demo.playback) {
+        if (!cls.demo.playback && cl.serverstate != ss_broadcast) {
             COM_strclr(s);
             Cmd_ExecTrigger(s);
         }
@@ -943,7 +948,7 @@ static void CL_ParsePrint(void)
     }
 
 #if USE_AUTOREPLY
-    if (!cls.demo.playback) {
+    if (!cls.demo.playback && cl.serverstate != ss_broadcast) {
         CL_CheckForVersion(s);
     }
 #endif
@@ -967,9 +972,11 @@ static void CL_ParsePrint(void)
 
     Con_SkipNotify(qfalse);
 
-#if USE_CHATHUD
     SCR_AddToChatHUD(s);
-#endif
+
+    // silence MVD spectator chat
+    if (cl.serverstate == ss_broadcast && !strncmp(s, "[MVD] ", 6))
+        return;
 
     // play sound
     if (cl_chat_sound->integer > 1)
@@ -986,7 +993,7 @@ static void CL_ParseCenterPrint(void)
     SHOWNET(2, "    \"%s\"\n", s);
     SCR_CenterPrint(s);
 
-    if (!cls.demo.playback) {
+    if (!cls.demo.playback && cl.serverstate != ss_broadcast) {
         COM_strclr(s);
         Cmd_ExecTrigger(s);
     }
@@ -1016,9 +1023,9 @@ static void CL_ParseInventory(void)
     }
 }
 
-static void CL_ParseDownload(void)
+static void CL_ParseDownload(int cmd)
 {
-    int size, percent;
+    int size, percent, compressed;
     byte *data;
 
     if (!cls.download.temp[0]) {
@@ -1029,8 +1036,19 @@ static void CL_ParseDownload(void)
     size = MSG_ReadShort();
     percent = MSG_ReadByte();
     if (size == -1) {
-        CL_HandleDownload(NULL, size, percent);
+        CL_HandleDownload(NULL, size, percent, qfalse);
         return;
+    }
+
+    // read optional uncompressed packet size
+    if (cmd == svc_zdownload) {
+        if (cls.serverProtocol == PROTOCOL_VERSION_R1Q2) {
+            compressed = MSG_ReadShort();
+        } else {
+            compressed = -1;
+        }
+    } else {
+        compressed = 0;
     }
 
     if (size < 0) {
@@ -1044,7 +1062,7 @@ static void CL_ParseDownload(void)
     data = msg_read.data + msg_read.readcount;
     msg_read.readcount += size;
 
-    CL_HandleDownload(data, size, percent);
+    CL_HandleDownload(data, size, percent, compressed);
 }
 
 static void CL_ParseZPacket(void)
@@ -1243,7 +1261,7 @@ badbyte:
             break;
 
         case svc_download:
-            CL_ParseDownload();
+            CL_ParseDownload(cmd);
             continue;
 
         case svc_frame:
@@ -1263,6 +1281,13 @@ badbyte:
                 goto badbyte;
             }
             CL_ParseZPacket();
+            continue;
+
+        case svc_zdownload:
+            if (cls.serverProtocol < PROTOCOL_VERSION_R1Q2) {
+                goto badbyte;
+            }
+            CL_ParseDownload(cmd);
             continue;
 
         case svc_gamestate:
@@ -1293,16 +1318,11 @@ badbyte:
                 cls.demo.others_dropped++;
             }
         }
-    }
 
-// if recording demos, write the message out
-    if (cls.demo.recording && !cls.demo.paused && CL_FRAMESYNC) {
-        CL_WriteDemoMessage(&cls.demo.buffer);
+        // if running GTV server, add current message
+        CL_GTV_WriteMessage(msg_read.data + readcount,
+                            msg_read.readcount - readcount);
     }
-
-// if playing demos, save a snapshot once the full packet is parsed
-    if (cls.demo.playback)
-        CL_EmitDemoSnapshot();
 }
 
 /*
@@ -1364,7 +1384,7 @@ void CL_SeekDemoMessage(void)
 
         case svc_print:
             MSG_ReadByte();
-            // fall thorugh
+            // fall through
 
         case svc_centerprint:
         case svc_stufftext:

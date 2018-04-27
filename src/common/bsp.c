@@ -54,7 +54,7 @@ static cvar_t *map_visibility_patch;
 
 LOAD(Visibility)
 {
-    unsigned numclusters, bitofs;
+    uint32_t numclusters, bitofs;
     int i, j;
 
     if (!count) {
@@ -105,7 +105,7 @@ LOAD(Texinfo)
     int         i;
 #if USE_REF
     int         j, k;
-    int         next;
+    int32_t     next;
     mtexinfo_t  *step;
 #endif
 
@@ -189,7 +189,7 @@ LOAD(BrushSides)
     dbrushside_t    *in;
     mbrushside_t    *out;
     int         i;
-    unsigned    planenum, texinfo;
+    uint16_t    planenum, texinfo;
 
     bsp->numbrushsides = count;
     bsp->brushsides = ALLOC(sizeof(*out) * count);
@@ -223,7 +223,7 @@ LOAD(Brushes)
     dbrush_t    *in;
     mbrush_t    *out;
     int         i;
-    unsigned    firstside, numsides, lastside;
+    uint32_t    firstside, numsides, lastside;
 
     bsp->numbrushes = count;
     bsp->brushes = ALLOC(sizeof(*out) * count);
@@ -252,7 +252,7 @@ LOAD(LeafBrushes)
     uint16_t    *in;
     mbrush_t    **out;
     int         i;
-    unsigned    brushnum;
+    uint16_t    brushnum;
 
     bsp->numleafbrushes = count;
     bsp->leafbrushes = ALLOC(sizeof(*out) * count);
@@ -312,7 +312,7 @@ LOAD(Edges)
     dedge_t     *in;
     medge_t     *out;
     int         i, j;
-    unsigned    vertnum;
+    uint16_t    vertnum;
 
     bsp->numedges = count;
     bsp->edges = ALLOC(sizeof(*out) * count);
@@ -337,8 +337,8 @@ LOAD(SurfEdges)
 {
     int         *in;
     msurfedge_t *out;
-    int         i;
-    int         index, vert;
+    int         i, vert;
+    int32_t     index;
 
     bsp->numsurfedges = count;
     bsp->surfedges = ALLOC(sizeof(*out) * count);
@@ -368,12 +368,12 @@ LOAD(SurfEdges)
 
 LOAD(Faces)
 {
-    dface_t *in;
-    mface_t *out;
-    int i, j;
-    unsigned texinfo, lightofs;
-    unsigned firstedge, numedges, lastedge;
-    unsigned planenum, side;
+    dface_t     *in;
+    mface_t     *out;
+    int         i, j;
+    uint32_t    firstedge, numedges, lastedge;
+    uint16_t    planenum, texinfo, side;
+    uint32_t    lightofs;
 
     bsp->numfaces = count;
     bsp->faces = ALLOC(sizeof(*out) * count);
@@ -387,6 +387,10 @@ LOAD(Faces)
         if (numedges < 3) {
             DEBUG("bad surfedges");
             return Q_ERR_TOO_FEW;
+        }
+        if (numedges > 4096) {
+            DEBUG("bad surfedges");
+            return Q_ERR_TOO_MANY;
         }
         if (lastedge < firstedge || lastedge > bsp->numsurfedges) {
             DEBUG("bad surfedges");
@@ -440,7 +444,7 @@ LOAD(LeafFaces)
     uint16_t    *in;
     mface_t     **out;
     int         i;
-    unsigned    facenum;
+    uint16_t    facenum;
 
     bsp->numleaffaces = count;
     bsp->leaffaces = ALLOC(sizeof(*out) * count);
@@ -464,11 +468,12 @@ LOAD(Leafs)
 {
     dleaf_t     *in;
     mleaf_t     *out;
-    int         i, cluster;
-    unsigned    area, firstleafbrush, numleafbrushes;
+    int         i;
+    uint16_t    cluster, area;
+    uint16_t    firstleafbrush, numleafbrushes, lastleafbrush;
 #if USE_REF
     int         j;
-    unsigned    firstleafface, numleaffaces;
+    uint16_t    firstleafface, numleaffaces, lastleafface;
 #endif
 
     if (!count) {
@@ -484,16 +489,16 @@ LOAD(Leafs)
     for (i = 0; i < count; i++, in++, out++) {
         out->plane = NULL;
         out->contents = LittleLong(in->contents);
-        cluster = (int16_t)LittleShort(in->cluster);
-        if (cluster == -1) {
+        cluster = LittleShort(in->cluster);
+        if (cluster == (uint16_t)-1) {
             // solid leafs use special -1 cluster
             out->cluster = -1;
         } else if (bsp->vis == NULL) {
-            // map has no vis, let's use 0 as a default cluster
+            // map has no vis, use 0 as a default cluster
             out->cluster = 0;
         } else {
             // validate cluster
-            if (cluster < 0 || cluster >= bsp->vis->numclusters) {
+            if (cluster >= bsp->vis->numclusters) {
                 DEBUG("bad cluster");
                 return Q_ERR_BAD_INDEX;
             }
@@ -509,7 +514,8 @@ LOAD(Leafs)
 
         firstleafbrush = LittleShort(in->firstleafbrush);
         numleafbrushes = LittleShort(in->numleafbrushes);
-        if (firstleafbrush + numleafbrushes > bsp->numleafbrushes) {
+        lastleafbrush = firstleafbrush + numleafbrushes;
+        if (lastleafbrush < firstleafbrush || lastleafbrush > bsp->numleafbrushes) {
             DEBUG("bad leafbrushes");
             return Q_ERR_BAD_INDEX;
         }
@@ -519,7 +525,8 @@ LOAD(Leafs)
 #if USE_REF
         firstleafface = LittleShort(in->firstleafface);
         numleaffaces = LittleShort(in->numleaffaces);
-        if (firstleafface + numleaffaces > bsp->numleaffaces) {
+        lastleafface = firstleafface + numleaffaces;
+        if (lastleafface < firstleafface || lastleafface > bsp->numleaffaces) {
             DEBUG("bad leaffaces");
             return Q_ERR_BAD_INDEX;
         }
@@ -547,12 +554,11 @@ LOAD(Leafs)
 LOAD(Nodes)
 {
     dnode_t     *in;
-    uint32_t    child;
     mnode_t     *out;
     int         i, j;
-    unsigned    planeNum;
+    uint32_t    planenum, child;
 #if USE_REF
-    unsigned    firstface, numfaces;
+    uint16_t    firstface, numfaces, lastface;
 #endif
 
     if (!count) {
@@ -566,12 +572,12 @@ LOAD(Nodes)
     in = base;
     out = bsp->nodes;
     for (i = 0; i < count; i++, out++, in++) {
-        planeNum = LittleLong(in->planenum);
-        if (planeNum >= bsp->numplanes) {
+        planenum = LittleLong(in->planenum);
+        if (planenum >= bsp->numplanes) {
             DEBUG("bad planenum");
             return Q_ERR_BAD_INDEX;
         }
-        out->plane = bsp->planes + planeNum;
+        out->plane = bsp->planes + planenum;
 
         for (j = 0; j < 2; j++) {
             child = LittleLong(in->children[j]);
@@ -594,7 +600,8 @@ LOAD(Nodes)
 #if USE_REF
         firstface = LittleShort(in->firstface);
         numfaces = LittleShort(in->numfaces);
-        if (firstface + numfaces > bsp->numfaces) {
+        lastface = firstface + numfaces;
+        if (lastface < firstface || lastface > bsp->numfaces) {
             DEBUG("bad faces");
             return Q_ERR_BAD_INDEX;
         }
@@ -619,9 +626,9 @@ LOAD(Submodels)
     dmodel_t    *in;
     mmodel_t    *out;
     int         i, j;
-    unsigned    headnode;
+    uint32_t    headnode;
 #if USE_REF
-    unsigned    firstface, numfaces, lastface;
+    uint32_t    firstface, numfaces, lastface;
 #endif
 
     if (!count) {
@@ -642,11 +649,19 @@ LOAD(Submodels)
             out->origin[j] = LittleFloat(in->origin[j]);
         }
         headnode = LittleLong(in->headnode);
-        if (headnode >= bsp->numnodes) {
-            // FIXME: headnode may be garbage for some models (a leaf perhaps)
-            Com_DPrintf("%s: bad headnode\n", __func__);
-            out->headnode = NULL;
+        if (headnode & 0x80000000) {
+            // be careful, some models have no nodes, just a leaf
+            headnode = ~headnode;
+            if (headnode >= bsp->numleafs) {
+                DEBUG("bad headleaf");
+                return Q_ERR_BAD_INDEX;
+            }
+            out->headnode = (mnode_t *)(bsp->leafs + headnode);
         } else {
+            if (headnode >= bsp->numnodes) {
+                DEBUG("bad headnode");
+                return Q_ERR_BAD_INDEX;
+            }
             out->headnode = bsp->nodes + headnode;
         }
 #if USE_REF
@@ -695,7 +710,7 @@ LOAD(Areas)
     darea_t     *in;
     marea_t     *out;
     int         i;
-    unsigned    numareaportals, firstareaportal, lastareaportal;
+    uint32_t    numareaportals, firstareaportal, lastareaportal;
 
     bsp->numareas = count;
     bsp->areas = ALLOC(sizeof(*out) * count);
@@ -867,11 +882,9 @@ static qerror_t BSP_ValidateTree(bsp_t *bsp)
             return Q_ERR_INVALID_FORMAT;
         }
 
-        if (mod->headnode) {
-            ret = BSP_SetParent(mod->headnode, ~i);
-            if (ret) {
-                return ret;
-            }
+        ret = BSP_SetParent(mod->headnode, ~i);
+        if (ret) {
+            return ret;
         }
 
 #if USE_REF

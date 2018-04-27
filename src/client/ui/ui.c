@@ -85,7 +85,6 @@ void UI_PushMenu(menuFrameWork_t *menu)
         uis.entersound = qtrue;
     }
 
-    uis.transparent |= menu->transparent;
     uis.activeMenu = menu;
 
     UI_DoHitTest();
@@ -99,20 +98,9 @@ static void UI_Resize(void)
 {
     int i;
 
-#if USE_REF == REF_SOFT
-    uis.clipRect.left = 0;
-    uis.clipRect.top = 0;
-    uis.clipRect.right = r_config.width;
-    uis.clipRect.bottom = r_config.height;
-    uis.scale = 1;
-    uis.width = r_config.width;
-    uis.height = r_config.height;
-#else
-    Cvar_ClampValue(ui_scale, 1, 9);
-    uis.scale = 1 / ui_scale->value;
+    uis.scale = R_ClampScale(ui_scale);
     uis.width = r_config.width * uis.scale;
     uis.height = r_config.height * uis.scale;
-#endif
 
     for (i = 0; i < uis.menuDepth; i++) {
         Menu_Init(uis.layers[i]);
@@ -142,6 +130,7 @@ void UI_ForceMenuOff(void)
     Key_SetDest(Key_GetDest() & ~KEY_MENU);
     uis.menuDepth = 0;
     uis.activeMenu = NULL;
+    uis.mouseTracker = NULL;
     uis.transparent = qfalse;
 }
 
@@ -153,7 +142,6 @@ UI_PopMenu
 void UI_PopMenu(void)
 {
     menuFrameWork_t *menu;
-    int i;
 
     if (uis.menuDepth < 1)
         Com_Error(ERR_FATAL, "UI_PopMenu: depth < 1");
@@ -169,14 +157,7 @@ void UI_PopMenu(void)
     }
 
     uis.activeMenu = uis.layers[uis.menuDepth - 1];
-
-    uis.transparent = qfalse;
-    for (i = uis.menuDepth - 1; i >= 0; i--) {
-        if (uis.layers[i]->transparent) {
-            uis.transparent = qtrue;
-            break;
-        }
-    }
+    uis.mouseTracker = NULL;
 
     UI_DoHitTest();
 }
@@ -196,7 +177,7 @@ qboolean UI_IsTransparent(void)
         return qtrue;
     }
 
-    return uis.transparent;
+    return uis.activeMenu->transparent;
 }
 
 menuFrameWork_t *UI_FindMenu(const char *name)
@@ -208,6 +189,7 @@ menuFrameWork_t *UI_FindMenu(const char *name)
             return menu;
         }
     }
+
     return NULL;
 }
 
@@ -384,9 +366,14 @@ qboolean UI_DoHitTest(void)
         return qfalse;
     }
 
-    if (!(item = Menu_HitTest(uis.activeMenu))) {
-        return qfalse;
+    if (uis.mouseTracker) {
+        item = uis.mouseTracker;
+    } else {
+        if (!(item = Menu_HitTest(uis.activeMenu))) {
+            return qfalse;
+        }
     }
+
     if (!UI_IsItemSelectable(item)) {
         return qfalse;
     }
@@ -438,13 +425,9 @@ void UI_Draw(int realtime)
     }
 
     R_ClearColor();
-#if USE_REF == REF_SOFT
-    R_SetClipRect(DRAW_CLIP_MASK, &uis.clipRect);
-#else
-    R_SetScale(&uis.scale);
-#endif
+    R_SetScale(uis.scale);
 
-    if (!uis.transparent) {
+    if (1) {
         // draw top menu
         if (uis.activeMenu->draw) {
             uis.activeMenu->draw(uis.activeMenu);
@@ -481,12 +464,8 @@ void UI_Draw(int realtime)
         S_StartLocalSound("misc/menu1.wav");
     }
 
-#if USE_REF == REF_SOFT
-    R_SetClipRect(DRAW_CLIP_DISABLED, NULL);
-#else
-    R_SetScale(NULL);
-#endif
     R_ClearColor();
+    R_SetScale(1.0f);
 }
 
 void UI_StartSound(menuSound_t sound)
@@ -511,14 +490,21 @@ void UI_StartSound(menuSound_t sound)
 
 /*
 =================
-UI_Keydown
+UI_KeyEvent
 =================
 */
-void UI_Keydown(int key)
+void UI_KeyEvent(int key, qboolean down)
 {
     menuSound_t sound;
 
     if (!uis.activeMenu) {
+        return;
+    }
+
+    if (!down) {
+        if (key == K_MOUSE1) {
+            uis.mouseTracker = NULL;
+        }
         return;
     }
 
@@ -608,7 +594,7 @@ static void ui_scale_changed(cvar_t *self)
 
 void UI_ModeChanged(void)
 {
-    ui_scale = Cvar_Get("ui_scale", "1", 0);
+    ui_scale = Cvar_Get("ui_scale", "0", 0);
     ui_scale->changed = ui_scale_changed;
     UI_Resize();
 }

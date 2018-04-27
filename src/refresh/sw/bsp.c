@@ -25,11 +25,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 qboolean        insubmodel;
 entity_t        *currententity;
 vec3_t          modelorg;       // modelorg is the viewpoint reletive to
-// the currently rendering entity
+                                // the currently rendering entity
 vec3_t          r_entorigin;    // the currently rendering entity in world
-// coordinates
+                                // coordinates
 
-float           entity_rotation[3][3];
+vec3_t          entity_rotation[3];
 
 int             r_currentbkey;
 
@@ -52,7 +52,7 @@ static qboolean     makeclippededge;
 R_EntityRotate
 ================
 */
-void R_EntityRotate(vec3_t vec)
+static void R_EntityRotate(vec3_t vec)
 {
     vec3_t  tvec;
 
@@ -70,65 +70,7 @@ R_RotateBmodel
 */
 void R_RotateBmodel(void)
 {
-    float   angle, s, c, temp1[3][3], temp2[3][3], temp3[3][3];
-
-// TODO: should use a look-up table
-// TODO: should really be stored with the entity instead of being reconstructed
-// TODO: could cache lazily, stored in the entity
-// TODO: share work with R_SetUpAliasTransform
-
-// yaw
-    angle = currententity->angles[YAW];
-    angle = angle * M_PI * 2 / 360;
-    s = sin(angle);
-    c = cos(angle);
-
-    temp1[0][0] = c;
-    temp1[0][1] = s;
-    temp1[0][2] = 0;
-    temp1[1][0] = -s;
-    temp1[1][1] = c;
-    temp1[1][2] = 0;
-    temp1[2][0] = 0;
-    temp1[2][1] = 0;
-    temp1[2][2] = 1;
-
-
-// pitch
-    angle = currententity->angles[PITCH];
-    angle = angle * M_PI * 2 / 360;
-    s = sin(angle);
-    c = cos(angle);
-
-    temp2[0][0] = c;
-    temp2[0][1] = 0;
-    temp2[0][2] = -s;
-    temp2[1][0] = 0;
-    temp2[1][1] = 1;
-    temp2[1][2] = 0;
-    temp2[2][0] = s;
-    temp2[2][1] = 0;
-    temp2[2][2] = c;
-
-    R_ConcatRotations(temp2, temp1, temp3);
-
-// roll
-    angle = currententity->angles[ROLL];
-    angle = angle * M_PI * 2 / 360;
-    s = sin(angle);
-    c = cos(angle);
-
-    temp1[0][0] = 1;
-    temp1[0][1] = 0;
-    temp1[0][2] = 0;
-    temp1[1][0] = 0;
-    temp1[1][1] = c;
-    temp1[1][2] = s;
-    temp1[2][0] = 0;
-    temp1[2][1] = -s;
-    temp1[2][2] = c;
-
-    R_ConcatRotations(temp1, temp3, entity_rotation);
+    AnglesToAxis(currententity->angles, entity_rotation);
 
 //
 // rotate modelorg and the transformation matrix
@@ -149,7 +91,7 @@ R_RecursiveClipBPoly
 Clip a bmodel poly down the world bsp tree
 ================
 */
-void R_RecursiveClipBPoly(bedge_t *pedges, mnode_t *pnode, mface_t *psurf)
+static void R_RecursiveClipBPoly(bedge_t *pedges, mnode_t *pnode, mface_t *psurf)
 {
     bedge_t     *psideedges[2], *pnextedge, *ptedge;
     int         i, side, lastside;
@@ -339,6 +281,11 @@ void R_DrawSolidClippedSubmodelPolygons(mmodel_t *pmodel, mnode_t *topnode)
         pbedge = &bedges[numbedges];
         numbedges += psurf->numsurfedges;
 
+        if (numbedges >= MAX_BMODEL_EDGES) {
+            Com_Printf("Out of edges for bmodel\n");
+            return;
+        }
+
         surfedge = psurf->firstsurfedge;
         for (j = 0; j < psurf->numsurfedges; j++, surfedge++) {
             pbedge[j].v[0] = surfedge->edge->v[surfedge->vert    ];
@@ -348,7 +295,7 @@ void R_DrawSolidClippedSubmodelPolygons(mmodel_t *pmodel, mnode_t *topnode)
 
         pbedge[j - 1].pnext = NULL; // mark end of edges
 
-        if (!(psurf->texinfo->c.flags & (SURF_TRANS66 | SURF_TRANS33)))
+        if (!(psurf->texinfo->c.flags & SURF_TRANS_MASK))
             R_RecursiveClipBPoly(pbedge, topnode, psurf);
         else
             R_RenderBmodelFace(pbedge, psurf);
@@ -401,7 +348,7 @@ int c_drawnode;
 R_RecursiveWorldNode
 ================
 */
-void R_RecursiveWorldNode(mnode_t *node, int clipflags)
+static void R_RecursiveWorldNode(mnode_t *node, int clipflags)
 {
     int         i, c, side, *pindex;
     vec3_t      acceptpt, rejectpt;

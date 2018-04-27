@@ -50,6 +50,20 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define PATH_SEP_STRING     "/"
 #endif
 
+#if (defined _WIN32)
+#define LIBGL   "opengl32"
+#define LIBAL   "openal32"
+#elif (defined __OpenBSD__)
+#define LIBGL   "libGL.so"
+#define LIBAL   "libopenal.so"
+#elif (defined __APPLE__)
+#define LIBGL   "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+#define LIBAL   "/System/Library/Frameworks/OpenAL.framework/OpenAL"
+#else
+#define LIBGL   "libGL.so.1"
+#define LIBAL   "libopenal.so.1"
+#endif
+
 #ifdef _WIN32
 #define os_mkdir(p)         _mkdir(p)
 #define os_unlink(p)        _unlink(p)
@@ -83,6 +97,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define q_printf(f, a)      __attribute__((format(printf, f, a)))
 #define q_noreturn          __attribute__((noreturn))
+#define q_noinline          __attribute__((noinline))
 #define q_malloc            __attribute__((malloc))
 #if __GNUC__ >= 4
 #define q_sentinel          __attribute__((sentinel))
@@ -116,6 +131,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define q_printf(f, a)
 #define q_noreturn
+#define q_noinline
 #define q_malloc
 #define q_sentinel
 

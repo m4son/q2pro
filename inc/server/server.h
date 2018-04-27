@@ -25,9 +25,8 @@ typedef enum {
     ss_dead,            // no map loaded
     ss_loading,         // spawning level edicts
     ss_game,            // actively running
-#if USE_MVD_CLIENT
+    ss_pic,             // showing static picture
     ss_broadcast        // running MVD client
-#endif
 } server_state_t;
 
 #if USE_ICMP
@@ -43,6 +42,10 @@ void SV_SetConsoleTitle(void);
 
 #if USE_MVD_CLIENT && USE_CLIENT
 int MVD_GetDemoPercent(qboolean *paused, int *framenum);
+#endif
+
+#if USE_CLIENT
+char *SV_GetSaveInfo(const char *dir);
 #endif
 
 #endif // SERVER_H

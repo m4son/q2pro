@@ -267,7 +267,7 @@ static void MVD_UnicastLayout(mvd_t *mvd, mvd_player_t *player)
 {
     mvd_client_t *client;
 
-    if (player != mvd->dummy) {
+    if (mvd->dummy && player != mvd->dummy) {
         MSG_ReadString(NULL, 0);
         return; // we don't care about others
     }
@@ -739,8 +739,15 @@ static void MVD_ParsePacketEntities(mvd_t *mvd)
             MVD_LinkEdict(mvd, ent);
         }
 
+        // mark this entity as seen even if removed
+        ent->svflags |= SVF_MONSTER;
+
+        // shuffle current origin to old if removed
         if (bits & U_REMOVE) {
             SHOWNET(2, "   remove: %d\n", number);
+            if (!(ent->s.renderfx & RF_BEAM)) {
+                VectorCopy(ent->s.origin, ent->s.old_origin);
+            }
             ent->inuse = qfalse;
             continue;
         }
@@ -839,7 +846,7 @@ static void MVD_ParseFrame(mvd_t *mvd)
 
     // update clients now so that effects datagram that
     // follows can reference current view positions
-    if (mvd->state && !mvd->demoseeking) {
+    if (mvd->state && mvd->framenum && !mvd->demoseeking) {
         MVD_UpdateClients(mvd);
     }
 
@@ -853,7 +860,7 @@ void MVD_ClearState(mvd_t *mvd, qboolean full)
     int i;
 
     // clear all entities, don't trust num_edicts as it is possible
-    // to miscount removed entities
+    // to miscount removed but seen entities
     memset(mvd->edicts, 0, sizeof(mvd->edicts));
     mvd->pool.num_edicts = 0;
 
@@ -1006,15 +1013,24 @@ static void MVD_ParseServerData(mvd_t *mvd, int extrabits)
 
         // clear chase targets
         FOR_EACH_MVDCL(client, mvd) {
-            client->target = client->oldtarget = NULL;
+            client->target = NULL;
+            client->oldtarget = NULL;
+            client->chase_mask = 0;
+            client->chase_auto = qfalse;
+            client->chase_wait = qfalse;
+            memset(client->chase_bitmap, 0, sizeof(client->chase_bitmap));
         }
     }
 
-    // validate clientNum
-    if (mvd->clientNum < 0 || mvd->clientNum >= mvd->maxclients) {
-        MVD_Destroyf(mvd, "Invalid client num: %d", mvd->clientNum);
+    if (mvd->clientNum == -1) {
+        mvd->dummy = NULL;
+    } else {
+        // validate clientNum
+        if (mvd->clientNum < 0 || mvd->clientNum >= mvd->maxclients) {
+            MVD_Destroyf(mvd, "Invalid client num: %d", mvd->clientNum);
+        }
+        mvd->dummy = mvd->players + mvd->clientNum;
     }
-    mvd->dummy = mvd->players + mvd->clientNum;
 
     // parse world model
     string = mvd->configstrings[CS_MODELS + 1];

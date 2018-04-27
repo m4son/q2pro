@@ -53,7 +53,7 @@ R_TextureAnimation
 Returns the proper texture for a given time and base texture
 ===============
 */
-image_t *R_TextureAnimation(mtexinfo_t *tex)
+static image_t *R_TextureAnimation(mtexinfo_t *tex)
 {
     int     c;
 
@@ -74,7 +74,7 @@ image_t *R_TextureAnimation(mtexinfo_t *tex)
 R_DrawSurface
 ===============
 */
-void R_DrawSurface(void)
+static void R_DrawSurface(void)
 {
     byte        *basetptr;
     int         smax, tmax, twidth;
@@ -143,7 +143,6 @@ void R_DrawSurface(void)
 }
 
 //=============================================================================
-#if !USE_ASM
 
 #define BLOCK_FUNC R_DrawSurfaceBlock8_mip0
 #define BLOCK_SHIFT 4
@@ -161,9 +160,6 @@ void R_DrawSurface(void)
 #define BLOCK_SHIFT 1
 #include "block.h"
 
-#endif
-
-
 //============================================================================
 
 
@@ -180,7 +176,9 @@ void R_InitCaches(void)
 
     // calculate size to allocate
     if (sw_surfcacheoverride->integer) {
-        size = sw_surfcacheoverride->integer;
+        size = Cvar_ClampInteger(sw_surfcacheoverride,
+                                 SURFCACHE_SIZE_AT_320X240,
+                                 SURFCACHE_SIZE_AT_320X240 * 25);
     } else {
         size = SURFCACHE_SIZE_AT_320X240;
 
@@ -188,6 +186,8 @@ void R_InitCaches(void)
         if (pix > 64000)
             size += (pix - 64000) * 3;
     }
+
+    size *= TEX_BYTES;
 
     // round up to page size
     size = (size + 8191) & ~8191;
@@ -243,7 +243,7 @@ void D_FlushCaches(void)
 D_SCAlloc
 =================
 */
-surfcache_t     *D_SCAlloc(int width, int size)
+static surfcache_t *D_SCAlloc(int width, int size)
 {
     surfcache_t             *new;
 
@@ -336,10 +336,10 @@ surfcache_t *D_CacheSurface(mface_t *surface, int miplevel)
 // if the surface is animating or flashing, flush the cache
 //
     r_drawsurf.image = R_TextureAnimation(surface->texinfo);
-    r_drawsurf.lightadj[0] = r_newrefdef.lightstyles[surface->styles[0]].white * 256;
-    r_drawsurf.lightadj[1] = r_newrefdef.lightstyles[surface->styles[1]].white * 256;
-    r_drawsurf.lightadj[2] = r_newrefdef.lightstyles[surface->styles[2]].white * 256;
-    r_drawsurf.lightadj[3] = r_newrefdef.lightstyles[surface->styles[3]].white * 256;
+    r_drawsurf.lightadj[0] = r_newrefdef.lightstyles[surface->styles[0]].white * sw_modulate->value * 256;
+    r_drawsurf.lightadj[1] = r_newrefdef.lightstyles[surface->styles[1]].white * sw_modulate->value * 256;
+    r_drawsurf.lightadj[2] = r_newrefdef.lightstyles[surface->styles[2]].white * sw_modulate->value * 256;
+    r_drawsurf.lightadj[3] = r_newrefdef.lightstyles[surface->styles[3]].white * sw_modulate->value * 256;
 
 //
 // see if the cache holds apropriate data

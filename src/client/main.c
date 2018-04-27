@@ -174,7 +174,7 @@ static void CL_UpdateGunSetting(void)
 {
     int nogun;
 
-    if (cls.state < ca_connected) {
+    if (!cls.netchan) {
         return;
     }
     if (cls.serverProtocol < PROTOCOL_VERSION_R1Q2) {
@@ -183,7 +183,7 @@ static void CL_UpdateGunSetting(void)
 
     if (cl_gun->integer == -1) {
         nogun = 2;
-    } else if (cl_gun->integer == 0 || info_hand->integer == 2) {
+    } else if (cl_gun->integer == 0 || (info_hand->integer == 2 && cl_gun->integer == 1)) {
         nogun = 1;
     } else {
         nogun = 0;
@@ -197,10 +197,9 @@ static void CL_UpdateGunSetting(void)
 
 static void CL_UpdateGibSetting(void)
 {
-    if (cls.state < ca_connected) {
+    if (!cls.netchan) {
         return;
     }
-
     if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO) {
         return;
     }
@@ -213,7 +212,7 @@ static void CL_UpdateGibSetting(void)
 
 static void CL_UpdateFootstepsSetting(void)
 {
-    if (cls.state < ca_connected) {
+    if (!cls.netchan) {
         return;
     }
     if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO) {
@@ -228,7 +227,7 @@ static void CL_UpdateFootstepsSetting(void)
 
 static void CL_UpdatePredictSetting(void)
 {
-    if (cls.state < ca_connected) {
+    if (!cls.netchan) {
         return;
     }
     if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO) {
@@ -244,7 +243,7 @@ static void CL_UpdatePredictSetting(void)
 #if USE_FPS
 static void CL_UpdateRateSetting(void)
 {
-    if (cls.state < ca_connected) {
+    if (!cls.netchan) {
         return;
     }
     if (cls.serverProtocol != PROTOCOL_VERSION_Q2PRO) {
@@ -257,6 +256,35 @@ static void CL_UpdateRateSetting(void)
     MSG_FlushTo(&cls.netchan->message);
 }
 #endif
+
+void CL_UpdateRecordingSetting(void)
+{
+    int rec;
+
+    if (!cls.netchan) {
+        return;
+    }
+    if (cls.serverProtocol < PROTOCOL_VERSION_R1Q2) {
+        return;
+    }
+
+    if (cls.demo.recording) {
+        rec = 1;
+    } else {
+        rec = 0;
+    }
+
+#if USE_CLIENT_GTV
+    if (cls.gtv.state == ca_active) {
+        rec |= 1;
+    }
+#endif
+
+    MSG_WriteByte(clc_setting);
+    MSG_WriteShort(CLS_RECORDING);
+    MSG_WriteShort(rec);
+    MSG_FlushTo(&cls.netchan->message);
+}
 
 /*
 ===================
@@ -290,7 +318,7 @@ qboolean CL_ForwardToServer(void)
     char    *cmd;
 
     cmd = Cmd_Argv(0);
-    if (cls.state < ca_active || *cmd == '-' || *cmd == '+') {
+    if (cls.state != ca_active || *cmd == '-' || *cmd == '+') {
         return qfalse;
     }
 
@@ -379,7 +407,7 @@ void CL_CheckForResend(void)
 
         cls.passive = qfalse;
 
-        Con_Popup();
+        Con_Popup(qtrue);
         UI_OpenMenu(UIMENU_NONE);
     }
 
@@ -535,7 +563,7 @@ usage:
     cls.connect_time -= CONNECT_FAST;
     cls.connect_count = 0;
 
-    Con_Popup();
+    Con_Popup(qtrue);
 
     CL_CheckForResend();
 
@@ -661,9 +689,7 @@ void CL_ClearState(void)
 {
     S_StopAllSounds();
     CL_ClearEffects();
-#if USE_LIGHTSTYLES
     CL_ClearLightStyles();
-#endif
     CL_ClearTEnts();
     LOC_FreeLocations();
 
@@ -704,7 +730,9 @@ void CL_Disconnect(error_type_t type)
         return;
     }
 
-    SCR_EndLoadingPlaque();    // get rid of loading plaque
+    SCR_EndLoadingPlaque(); // get rid of loading plaque
+
+    SCR_ClearChatHUD_f();   // clear chat HUD on server change
 
     if (cls.state > ca_disconnected && !cls.demo.playback) {
         EXEC_TRIGGER(cl_disconnectcmd);
@@ -743,6 +771,8 @@ void CL_Disconnect(error_type_t type)
     CL_CleanupDownloads();
 
     CL_ClearState();
+
+    CL_GTV_Suspend();
 
     cls.state = ca_disconnected;
     cls.userinfo_modified = 0;
@@ -947,7 +977,8 @@ CL_ParseInfoMessage
 Handle a reply from a ping
 =================
 */
-void CL_ParseInfoMessage(void) {
+static void CL_ParseInfoMessage(void)
+{
     char string[MAX_QPATH];
     request_t *r;
 
@@ -1097,7 +1128,7 @@ static void CL_Reconnect_f(void)
     }
 
     // issued manually at console
-    if (cls.serverAddress.type == NA_BAD) {
+    if (cls.serverAddress.type == NA_UNSPECIFIED) {
         Com_Printf("No server to reconnect to.\n");
         return;
     }
@@ -1341,10 +1372,12 @@ static void CL_ConnectionlessPacket(void)
                 break;
             }
             cls.serverProtocol = PROTOCOL_VERSION_R1Q2;
+            // fall through
         case PROTOCOL_VERSION_R1Q2:
             if (mask & 1) {
                 break;
             }
+            // fall through
         default:
             cls.serverProtocol = PROTOCOL_VERSION_DEFAULT;
             break;
@@ -1360,6 +1393,7 @@ static void CL_ConnectionlessPacket(void)
         netchan_type_t type;
         int anticheat = 0;
         char mapname[MAX_QPATH];
+        qboolean got_server = qfalse;
 
         if (cls.state < ca_connecting) {
             Com_DPrintf("Connect received while not connecting.  Ignored.\n");
@@ -1403,8 +1437,15 @@ static void CL_ConnectionlessPacket(void)
             } else if (!strncmp(s, "map=", 4)) {
                 Q_strlcpy(mapname, s + 4, sizeof(mapname));
             } else if (!strncmp(s, "dlserver=", 9)) {
-                HTTP_SetServer(s + 9);
+                if (!got_server) {
+                    HTTP_SetServer(s + 9);
+                    got_server = qtrue;
+                }
             }
+        }
+
+        if (!got_server) {
+            HTTP_SetServer(NULL);
         }
 
         Com_Printf("Connected to %s (protocol %d).\n",
@@ -1420,7 +1461,7 @@ static void CL_ConnectionlessPacket(void)
         if (anticheat) {
             MSG_WriteByte(clc_nop);
             MSG_FlushTo(&cls.netchan->message);
-            cls.netchan->Transmit(cls.netchan, 0, NULL, 3);
+            cls.netchan->Transmit(cls.netchan, 0, "", 3);
             S_StopAllSounds();
             cls.connect_count = -1;
             Com_Printf("Loading anticheat, this may take a few moments...\n");
@@ -1526,6 +1567,14 @@ static void CL_PacketEvent(void)
 #endif
 
     CL_ParseServerMessage();
+
+    // if recording demo, write the message out
+    if (cls.demo.recording && !cls.demo.paused && CL_FRAMESYNC) {
+        CL_WriteDemoMessage(&cls.demo.buffer);
+    }
+
+    // if running GTV server, transmit to client
+    CL_GTV_Transmit();
 
     if (!cls.netchan)
         return;     // might have disconnected
@@ -1711,7 +1760,7 @@ void CL_Begin(void)
     CL_LoadState(LOAD_SOUNDS);
     CL_RegisterSounds();
     LOC_LoadLocations();
-    CL_LoadState(LOAD_FINISH);
+    CL_LoadState(LOAD_NONE);
     cls.state = ca_precached;
 
 #if USE_FPS
@@ -1725,6 +1774,7 @@ void CL_Begin(void)
     CL_UpdateGibSetting();
     CL_UpdateFootstepsSetting();
     CL_UpdatePredictSetting();
+    CL_UpdateRecordingSetting();
 }
 
 /*
@@ -1754,7 +1804,7 @@ static void CL_Precache_f(void)
         CL_PrepRefresh();
         CL_LoadState(LOAD_SOUNDS);
         CL_RegisterSounds();
-        CL_LoadState(LOAD_FINISH);
+        CL_LoadState(LOAD_NONE);
         cls.state = ca_precached;
         return;
     }
@@ -2315,6 +2365,8 @@ void CL_RestartFilesystem(qboolean total)
         cls.state = ca_loading;
     }
 
+    Con_Popup(qfalse);
+
     UI_Shutdown();
 
     S_StopAllSounds();
@@ -2339,18 +2391,22 @@ void CL_RestartFilesystem(qboolean total)
 
     if (cls_state == ca_disconnected) {
         UI_OpenMenu(UIMENU_DEFAULT);
-    } else if (cls_state >= ca_loading) {
+    } else if (cls_state >= ca_loading && cls_state <= ca_active) {
         CL_LoadState(LOAD_MAP);
         CL_PrepRefresh();
         CL_LoadState(LOAD_SOUNDS);
         CL_RegisterSounds();
-        CL_LoadState(LOAD_FINISH);
+        CL_LoadState(LOAD_NONE);
+    } else if (cls_state == ca_cinematic) {
+        cl.image_precache[0] = R_RegisterPic2(cl.mapname);
     }
 
     CL_LoadDownloadIgnores();
 
     // switch back to original state
     cls.state = cls_state;
+
+    Con_Close(qfalse);
 
     CL_UpdateFrameTimes();
 
@@ -2371,6 +2427,8 @@ void CL_RestartRefresh(qboolean total)
         cls.state = ca_loading;
     }
 
+    Con_Popup(qfalse);
+
     S_StopAllSounds();
 
     if (total) {
@@ -2389,14 +2447,18 @@ void CL_RestartRefresh(qboolean total)
 
     if (cls_state == ca_disconnected) {
         UI_OpenMenu(UIMENU_DEFAULT);
-    } else if (cls_state >= ca_loading) {
+    } else if (cls_state >= ca_loading && cls_state <= ca_active) {
         CL_LoadState(LOAD_MAP);
         CL_PrepRefresh();
-        CL_LoadState(LOAD_FINISH);
+        CL_LoadState(LOAD_NONE);
+    } else if (cls_state == ca_cinematic) {
+        cl.image_precache[0] = R_RegisterPic2(cl.mapname);
     }
 
     // switch back to original state
     cls.state = cls_state;
+
+    Con_Close(qfalse);
 
     CL_UpdateFrameTimes();
 
@@ -2591,6 +2653,7 @@ static void CL_InitLocal(void)
     CL_InitEffects();
     CL_InitTEnts();
     CL_InitDownloads();
+    CL_GTV_Init();
 
     List_Init(&cl_ignores);
 
@@ -2689,7 +2752,7 @@ static void CL_InitLocal(void)
     info_fov = Cvar_Get("fov", "90", CVAR_USERINFO | CVAR_ARCHIVE);
     info_gender = Cvar_Get("gender", "male", CVAR_USERINFO | CVAR_ARCHIVE);
     info_gender->modified = qfalse; // clear this so we know when user sets it manually
-    info_uf = Cvar_Get("uf", va("%d", UF_LOCALFOV), CVAR_USERINFO);
+    info_uf = Cvar_Get("uf", "", CVAR_USERINFO);
 
 
     //
@@ -3002,7 +3065,7 @@ void CL_UpdateFrameTimes(void)
         ref_msec = phys_msec = 0;
         main_msec = fps_to_msec(10);
         sync_mode = SYNC_SLEEP_10;
-    } else if (cls.active == ACT_RESTORED || cls.state < ca_active) {
+    } else if (cls.active == ACT_RESTORED || cls.state != ca_active) {
         // run at 60 fps if not active
         ref_msec = phys_msec = 0;
         if (cl_async->integer > 1) {
@@ -3200,10 +3263,7 @@ run_fx:
 #if USE_DLIGHTS
         CL_RunDLights();
 #endif
-
-#if USE_LIGHTSTYLES
         CL_RunLightStyles();
-#endif
     } else if (sync_mode == SYNC_SLEEP_10) {
         // force audio and effects update if not rendering
         CL_CalcViewValues();
@@ -3246,6 +3306,8 @@ qboolean CL_ProcessEvents(void)
     Cbuf_Execute(&cl_cmdbuf);
 
     HTTP_RunDownloads();
+
+    CL_GTV_Run();
 
     return cl.sendPacketNow;
 }
@@ -3327,6 +3389,8 @@ void CL_Shutdown(void)
     if (!cl_running || !cl_running->integer) {
         return;
     }
+
+    CL_GTV_Shutdown();
 
     CL_Disconnect(ERR_FATAL);
 

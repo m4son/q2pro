@@ -21,8 +21,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "common/cvar.h"
 #include "common/common.h"
 #include "common/files.h"
-#include "qal.h"
+#include "dynamic.h"
+
+#ifdef __APPLE__
+#include <OpenAL/alc.h>
+#else
 #include <AL/alc.h>
+#endif
 
 #define QALC_IMP \
     QAL(LPALCCREATECONTEXT, alcCreateContext); \
@@ -89,14 +94,6 @@ void QAL_Shutdown(void)
         al_device->flags &= ~CVAR_SOUND;
 }
 
-#if (defined _WIN32)
-#define LIBAL   "openal32"
-#elif (defined __OpenBSD__)
-#define LIBAL   "libopenal.so"
-#else
-#define LIBAL   "libopenal.so.1"
-#endif
-
 qboolean QAL_Init(void)
 {
     al_driver = Cvar_Get("al_driver", LIBAL, 0);
@@ -110,7 +107,7 @@ qboolean QAL_Init(void)
         return qfalse;
     }
 
-#define QAL(type, func)  q##func = Sys_GetProcAddress(handle, #func)
+#define QAL(type, func)  if ((q##func = Sys_GetProcAddress(handle, #func)) == NULL) goto fail;
     QALC_IMP
     QAL_IMP
 #undef QAL

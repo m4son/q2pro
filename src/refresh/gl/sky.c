@@ -55,6 +55,7 @@ static const int vec_to_st[6][3] = {
     { -2, 1, -3 }
 };
 
+static vec3_t       skymatrix[3];
 static float        skymins[2][6], skymaxs[2][6];
 static int          skyfaces;
 static const float  sky_min = 1.0f / 512.0f;
@@ -143,8 +144,11 @@ static void ClipSkyPolygon(int nump, vec3_t vecs, int stage)
     int     newc[2];
     int     i, j;
 
-    if (nump > MAX_CLIP_VERTS - 2)
-        Com_Error(ERR_DROP,  "ClipSkyPolygon: MAX_CLIP_VERTS");
+    if (nump > MAX_CLIP_VERTS - 2) {
+        Com_DPrintf("%s: too many verts\n", __func__);
+        return;
+    }
+
     if (stage == 6) {
         // fully clipped, so draw it
         DrawSkyPolygon(nump, vecs);
@@ -161,8 +165,9 @@ static void ClipSkyPolygon(int nump, vec3_t vecs, int stage)
         } else if (d < -ON_EPSILON) {
             back = qtrue;
             sides[i] = SIDE_BACK;
-        } else
+        } else {
             sides[i] = SIDE_ON;
+        }
         dists[i] = d;
     }
 
@@ -214,6 +219,13 @@ static void ClipSkyPolygon(int nump, vec3_t vecs, int stage)
     ClipSkyPolygon(newc[1], newv[1][0], stage + 1);
 }
 
+static inline void SkyInverseRotate(vec3_t out, const vec3_t in)
+{
+    out[0] = skymatrix[0][0] * in[0] + skymatrix[1][0] * in[1] + skymatrix[2][0] * in[2];
+    out[1] = skymatrix[0][1] * in[0] + skymatrix[1][1] * in[1] + skymatrix[2][1] * in[2];
+    out[2] = skymatrix[0][2] * in[0] + skymatrix[1][2] * in[1] + skymatrix[2][2] * in[2];
+}
+
 /*
 =================
 R_AddSkySurface
@@ -223,18 +235,31 @@ void R_AddSkySurface(mface_t *fa)
 {
     int         i;
     vec3_t      verts[MAX_CLIP_VERTS];
+    vec3_t      temp;
     msurfedge_t *surfedge;
     mvertex_t   *vert;
 
     if (fa->numsurfedges > MAX_CLIP_VERTS) {
-        Com_Error(ERR_DROP, "%s: too many verts", __func__);
+        Com_DPrintf("%s: too many verts\n", __func__);
+        return;
     }
 
     // calculate vertex values for sky box
     surfedge = fa->firstsurfedge;
-    for (i = 0; i < fa->numsurfedges; i++, surfedge++) {
-        vert = surfedge->edge->v[surfedge->vert];
-        VectorSubtract(vert->point, glr.fd.vieworg, verts[i]);
+    if (skyrotate) {
+        if (!skyfaces)
+            SetupRotationMatrix(skymatrix, skyaxis, glr.fd.time * skyrotate);
+
+        for (i = 0; i < fa->numsurfedges; i++, surfedge++) {
+            vert = surfedge->edge->v[surfedge->vert];
+            VectorSubtract(vert->point, glr.fd.vieworg, temp);
+            SkyInverseRotate(verts[i], temp);
+        }
+    } else {
+        for (i = 0; i < fa->numsurfedges; i++, surfedge++) {
+            vert = surfedge->edge->v[surfedge->vert];
+            VectorSubtract(vert->point, glr.fd.vieworg, verts[i]);
+        }
     }
 
     ClipSkyPolygon(fa->numsurfedges, verts[0], 0);
@@ -258,9 +283,9 @@ void R_ClearSkyBox(void)
     skyfaces = 0;
 }
 
-static void MakeSkyVec(float s, float t, int axis, vec_t *v)
+static void MakeSkyVec(float s, float t, int axis, vec_t *out)
 {
-    vec3_t  b;
+    vec3_t  b, v;
     int     j, k;
 
     b[0] = s * gl_static.world.size;
@@ -273,6 +298,14 @@ static void MakeSkyVec(float s, float t, int axis, vec_t *v)
             v[j] = -b[-k - 1];
         else
             v[j] = b[k - 1];
+    }
+
+    if (skyrotate) {
+        out[0] = DotProduct(skymatrix[0], v) + glr.fd.vieworg[0];
+        out[1] = DotProduct(skymatrix[1], v) + glr.fd.vieworg[1];
+        out[2] = DotProduct(skymatrix[2], v) + glr.fd.vieworg[2];
+    } else {
+        VectorAdd(v, glr.fd.vieworg, out);
     }
 
     // avoid bilerp seam
@@ -288,8 +321,8 @@ static void MakeSkyVec(float s, float t, int axis, vec_t *v)
     else if (t > sky_max)
         t = sky_max;
 
-    v[3] = s;
-    v[4] = 1.0 - t;
+    out[3] = s;
+    out[4] = 1.0 - t;
 }
 
 #define SKY_VISIBLE(side) \
@@ -311,34 +344,17 @@ void R_DrawSkyBox(void)
     if (!skyfaces)
         return; // nothing visible
 
-    if (skyrotate) {
-        // hack, forces full sky to draw when rotating
-        for (i = 0; i < 6; i++) {
-            skymins[0][i] = -1;
-            skymins[1][i] = -1;
-            skymaxs[0][i] = 1;
-            skymaxs[1][i] = 1;
-        }
-    }
-
-    qglPushMatrix();
-    qglTranslatef(glr.fd.vieworg[0], glr.fd.vieworg[1], glr.fd.vieworg[2]);
-    if (skyrotate) {
-        qglRotatef(glr.fd.time * skyrotate, skyaxis[0], skyaxis[1], skyaxis[2]);
-    }
-
-    GL_TexEnv(GL_REPLACE);
-    GL_Bits(GLS_DEFAULT);
-
-    qglVertexPointer(3, GL_FLOAT, 5 * 4, &verts[0][0]);
-    qglTexCoordPointer(2, GL_FLOAT, 5 * 4, &verts[0][3]);
+    GL_StateBits(GLS_TEXTURE_REPLACE);
+    GL_ArrayBits(GLA_VERTEX | GLA_TC);
+    GL_VertexPointer(3, 5, &verts[0][0]);
+    GL_TexCoordPointer(2, 5, &verts[0][3]);
 
     for (i = 0; i < 6; i++) {
         if (!SKY_VISIBLE(i)) {
             continue;
         }
 
-        GL_BindTexture(sky_images[skytexorder[i]]);
+        GL_BindTexture(0, sky_images[skytexorder[i]]);
 
         MakeSkyVec(skymaxs[0][i], skymins[1][i], i, verts[0]);
         MakeSkyVec(skymins[0][i], skymins[1][i], i, verts[1]);
@@ -346,8 +362,6 @@ void R_DrawSkyBox(void)
         MakeSkyVec(skymins[0][i], skymaxs[1][i], i, verts[3]);
         qglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-
-    qglPopMatrix();
 }
 
 static void R_UnsetSky(void)
@@ -380,7 +394,7 @@ void R_SetSky(const char *name, float rotate, vec3_t axis)
     }
 
     skyrotate = rotate;
-    VectorCopy(axis, skyaxis);
+    VectorNormalize2(axis, skyaxis);
 
     for (i = 0; i < 6; i++) {
         len = Q_concat(pathname, sizeof(pathname),
@@ -390,7 +404,7 @@ void R_SetSky(const char *name, float rotate, vec3_t axis)
             return;
         }
         FS_NormalizePath(pathname, pathname);
-        image = IMG_Find(pathname, IT_SKY);
+        image = IMG_Find(pathname, IT_SKY, IF_NONE);
         if (image->texnum == TEXNUM_DEFAULT) {
             R_UnsetSky();
             return;

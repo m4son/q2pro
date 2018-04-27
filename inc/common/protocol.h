@@ -44,7 +44,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define PROTOCOL_VERSION_Q2PRO_RESERVED         1016    // r364
 #define PROTOCOL_VERSION_Q2PRO_BEAM_ORIGIN      1017    // r1037-8
 #define PROTOCOL_VERSION_Q2PRO_SHORT_ANGLES     1018    // r1037-44
-#define PROTOCOL_VERSION_Q2PRO_CURRENT          1018    // r1037-44
+#define PROTOCOL_VERSION_Q2PRO_SERVER_STATE     1019    // r1302
+#define PROTOCOL_VERSION_Q2PRO_EXTENDED_LAYOUT  1020    // r1354
+#define PROTOCOL_VERSION_Q2PRO_ZLIB_DOWNLOADS   1021    // r1358
+#define PROTOCOL_VERSION_Q2PRO_CURRENT          1021    // r1358
 
 #define PROTOCOL_VERSION_MVD_MINIMUM            2009    // r168
 #define PROTOCOL_VERSION_MVD_CURRENT            2010    // r177
@@ -167,7 +170,7 @@ typedef enum {
 // MVD stream flags (only 3 bits can be used)
 typedef enum {
     MVF_NOMSGS      = 1,
-    MVF_RESERVED1   = 2,
+    MVF_SINGLEPOV   = 2,
     MVF_RESERVED2   = 4
 } mvd_flags_t;
 

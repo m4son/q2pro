@@ -30,39 +30,34 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define FRAMECOUNT_MASK         0x7FFFFFFFUL
 #endif
 
-uintptr_t   cacheoffset;
+static uintptr_t    cacheoffset;
 
 int         c_faceclip;                 // number of faces clipped
 
-
-clipplane_t *entity_clipplanes;
 clipplane_t view_clipplanes[4];
-clipplane_t world_clipplanes[16];
 
-medge_t         *r_pedge;
+static medge_t      *r_pedge;
 
-qboolean        r_leftclipped, r_rightclipped;
-qboolean        r_nearzionly;
+static qboolean     r_leftclipped, r_rightclipped;
+static qboolean     r_nearzionly;
 
-mvertex_t   r_leftenter, r_leftexit;
-mvertex_t   r_rightenter, r_rightexit;
+static mvertex_t    r_leftenter, r_leftexit;
+static mvertex_t    r_rightenter, r_rightexit;
 
-int             r_emitted;
-float           r_nearzi;
-float           r_u1, r_v1, r_lzi1;
-int             r_ceilv1;
+static int          r_emitted;
+static float        r_nearzi;
+static float        r_u1, r_v1, r_lzi1;
+static int          r_ceilv1;
 
-qboolean        r_lastvertvalid;
+static qboolean     r_lastvertvalid;
 
-
-#if !USE_ASM
 
 /*
 ================
 R_EmitEdge
 ================
 */
-void R_EmitEdge(mvertex_t *pv0, mvertex_t *pv1)
+static void R_EmitEdge(mvertex_t *pv0, mvertex_t *pv1)
 {
     edge_t  *edge, *pcheck;
     int     u_check;
@@ -91,15 +86,15 @@ void R_EmitEdge(mvertex_t *pv0, mvertex_t *pv1)
         lzi0 = 1.0 / transformed[2];
 
         // FIXME: build x/yscale into transform?
-        scale = xscale * lzi0;
-        u0 = (xcenter + scale * transformed[0]);
+        scale = r_refdef.xscale * lzi0;
+        u0 = (r_refdef.xcenter + scale * transformed[0]);
         if (u0 < r_refdef.fvrectx_adj)
             u0 = r_refdef.fvrectx_adj;
         if (u0 > r_refdef.fvrectright_adj)
             u0 = r_refdef.fvrectright_adj;
 
-        scale = yscale * lzi0;
-        v0 = (ycenter - scale * transformed[1]);
+        scale = r_refdef.yscale * lzi0;
+        v0 = (r_refdef.ycenter - scale * transformed[1]);
         if (v0 < r_refdef.fvrecty_adj)
             v0 = r_refdef.fvrecty_adj;
         if (v0 > r_refdef.fvrectbottom_adj)
@@ -119,15 +114,15 @@ void R_EmitEdge(mvertex_t *pv0, mvertex_t *pv1)
 
     r_lzi1 = 1.0 / transformed[2];
 
-    scale = xscale * r_lzi1;
-    r_u1 = (xcenter + scale * transformed[0]);
+    scale = r_refdef.xscale * r_lzi1;
+    r_u1 = (r_refdef.xcenter + scale * transformed[0]);
     if (r_u1 < r_refdef.fvrectx_adj)
         r_u1 = r_refdef.fvrectx_adj;
     if (r_u1 > r_refdef.fvrectright_adj)
         r_u1 = r_refdef.fvrectright_adj;
 
-    scale = yscale * r_lzi1;
-    r_v1 = (ycenter - scale * transformed[1]);
+    scale = r_refdef.yscale * r_lzi1;
+    r_v1 = (r_refdef.ycenter - scale * transformed[1]);
     if (r_v1 < r_refdef.fvrecty_adj)
         r_v1 = r_refdef.fvrecty_adj;
     if (r_v1 > r_refdef.fvrectbottom_adj)
@@ -230,7 +225,7 @@ void R_EmitEdge(mvertex_t *pv0, mvertex_t *pv1)
 R_ClipEdge
 ================
 */
-void R_ClipEdge(mvertex_t *pv0, mvertex_t *pv1, clipplane_t *clip)
+static void R_ClipEdge(mvertex_t *pv0, mvertex_t *pv1, clipplane_t *clip)
 {
     float       d0, d1, f;
     mvertex_t   clipvert;
@@ -301,15 +296,13 @@ void R_ClipEdge(mvertex_t *pv0, mvertex_t *pv1, clipplane_t *clip)
     R_EmitEdge(pv0, pv1);
 }
 
-#endif  // !USE_ASM
-
 
 /*
 ================
 R_EmitCachedEdge
 ================
 */
-void R_EmitCachedEdge(void)
+static void R_EmitCachedEdge(void)
 {
     edge_t      *pedge_t;
 
@@ -345,7 +338,7 @@ void R_RenderFace(mface_t *fa, int clipflags)
     qboolean    makeleftedge, makerightedge;
 
     // translucent surfaces are not drawn by the edge renderer
-    if (fa->texinfo->c.flags & (SURF_TRANS33 | SURF_TRANS66)) {
+    if (fa->texinfo->c.flags & SURF_TRANS_MASK) {
         fa->next = r_alpha_surfaces;
         r_alpha_surfaces = fa;
         return;
@@ -466,11 +459,11 @@ void R_RenderFace(mface_t *fa, int clipflags)
 // FIXME: cache this?
     distinv = 1.0 / (pplane->dist - DotProduct(modelorg, pplane->normal));
 
-    surface_p->d_zistepu = p_normal[0] * xscaleinv * distinv;
-    surface_p->d_zistepv = -p_normal[1] * yscaleinv * distinv;
+    surface_p->d_zistepu = p_normal[0] * r_refdef.xscaleinv * distinv;
+    surface_p->d_zistepv = -p_normal[1] * r_refdef.yscaleinv * distinv;
     surface_p->d_ziorigin = p_normal[2] * distinv -
-                            xcenter * surface_p->d_zistepu -
-                            ycenter * surface_p->d_zistepv;
+                            r_refdef.xcenter * surface_p->d_zistepu -
+                            r_refdef.ycenter * surface_p->d_zistepv;
 
     surface_p++;
 }
@@ -492,7 +485,7 @@ void R_RenderBmodelFace(bedge_t *pedges, mface_t *psurf)
     clipplane_t *pclip;
     qboolean    makeleftedge, makerightedge;
 
-    if (psurf->texinfo->c.flags & (SURF_TRANS33 | SURF_TRANS66)) {
+    if (psurf->texinfo->c.flags & SURF_TRANS_MASK) {
         psurf->next = r_alpha_surfaces;
         r_alpha_surfaces = psurf;
         return;
@@ -580,11 +573,11 @@ void R_RenderBmodelFace(bedge_t *pedges, mface_t *psurf)
 // FIXME: cache this?
     distinv = 1.0 / (pplane->dist - DotProduct(modelorg, pplane->normal));
 
-    surface_p->d_zistepu = p_normal[0] * xscaleinv * distinv;
-    surface_p->d_zistepv = -p_normal[1] * yscaleinv * distinv;
+    surface_p->d_zistepu = p_normal[0] * r_refdef.xscaleinv * distinv;
+    surface_p->d_zistepv = -p_normal[1] * r_refdef.yscaleinv * distinv;
     surface_p->d_ziorigin = p_normal[2] * distinv -
-                            xcenter * surface_p->d_zistepu -
-                            ycenter * surface_p->d_zistepv;
+                            r_refdef.xcenter * surface_p->d_zistepu -
+                            r_refdef.ycenter * surface_p->d_zistepv;
 
     surface_p++;
 }

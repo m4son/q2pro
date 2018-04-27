@@ -261,6 +261,10 @@ void SV_Multicast(vec3_t origin, multicast_t to)
     int         flags;
     vec3_t      org;
 
+    if (!sv.cm.cache) {
+        Com_Error(ERR_DROP, "%s: no map loaded", __func__);
+    }
+
     flags = 0;
 
     switch (to) {
@@ -331,6 +335,58 @@ void SV_Multicast(vec3_t origin, multicast_t to)
     SZ_Clear(&msg_write);
 }
 
+static qboolean compress_message(client_t *client, int flags)
+{
+#if USE_ZLIB
+    byte    buffer[MAX_MSGLEN];
+
+    if (!(flags & MSG_COMPRESS))
+        return qfalse;
+
+    if (!client->has_zlib)
+        return qfalse;
+
+    // older clients have problems seamlessly writing svc_zpackets
+    if (client->settings[CLS_RECORDING]) {
+        if (client->protocol != PROTOCOL_VERSION_Q2PRO)
+            return qfalse;
+        if (client->version < PROTOCOL_VERSION_Q2PRO_EXTENDED_LAYOUT)
+            return qfalse;
+    }
+
+    // compress only sufficiently large layouts
+    if (msg_write.cursize < client->netchan->maxpacketlen / 2)
+        return qfalse;
+
+    deflateReset(&svs.z);
+    svs.z.next_in = msg_write.data;
+    svs.z.avail_in = (uInt)msg_write.cursize;
+    svs.z.next_out = buffer + 5;
+    svs.z.avail_out = (uInt)(MAX_MSGLEN - 5);
+
+    if (deflate(&svs.z, Z_FINISH) != Z_STREAM_END)
+        return qfalse;
+
+    buffer[0] = svc_zpacket;
+    buffer[1] = svs.z.total_out & 255;
+    buffer[2] = (svs.z.total_out >> 8) & 255;
+    buffer[3] = msg_write.cursize & 255;
+    buffer[4] = (msg_write.cursize >> 8) & 255;
+
+    SV_DPrintf(0, "%s: comp: %lu into %lu\n",
+               client->name, svs.z.total_in, svs.z.total_out + 5);
+
+    if (svs.z.total_out + 5 > msg_write.cursize)
+        return qfalse;
+
+    client->AddMessage(client, buffer, svs.z.total_out + 5,
+                       (flags & MSG_RELIABLE) ? qtrue : qfalse);
+    return qtrue;
+#else
+    return qfalse;
+#endif
+}
+
 /*
 =======================
 SV_ClientAddMessage
@@ -349,9 +405,14 @@ void SV_ClientAddMessage(client_t *client, int flags)
         return;
     }
 
+    if (compress_message(client, flags)) {
+        goto clear;
+    }
+
     client->AddMessage(client, msg_write.data, msg_write.cursize,
                        (flags & MSG_RELIABLE) ? qtrue : qfalse);
 
+clear:
     if (flags & MSG_CLEAR) {
         SZ_Clear(&msg_write);
     }
@@ -868,6 +929,49 @@ finish:
     }
 }
 
+static void write_pending_download(client_t *client)
+{
+    sizebuf_t   *buf;
+    size_t      remaining;
+    int         chunk, percent;
+
+    if (!client->download)
+        return;
+
+    if (!client->downloadpending)
+        return;
+
+    if (client->netchan->reliable_length)
+        return;
+
+    buf = &client->netchan->message;
+    if (buf->cursize > client->netchan->maxpacketlen)
+        return;
+
+    remaining = client->netchan->maxpacketlen - buf->cursize;
+    if (remaining <= 4)
+        return;
+
+    chunk = client->downloadsize - client->downloadcount;
+    if (chunk > remaining - 4)
+        chunk = remaining - 4;
+
+    client->downloadpending = qfalse;
+    client->downloadcount += chunk;
+
+    percent = client->downloadcount * 100 / client->downloadsize;
+
+    SZ_WriteByte(buf, client->downloadcmd);
+    SZ_WriteShort(buf, chunk);
+    SZ_WriteByte(buf, percent);
+    SZ_Write(buf, client->download + client->downloadcount - chunk, chunk);
+
+    if (client->downloadcount == client->downloadsize) {
+        SV_CloseDownload(client);
+        SV_AlignKeyFrames(client);
+    }
+}
+
 /*
 ==================
 SV_SendAsyncPackets
@@ -919,9 +1023,13 @@ void SV_SendAsyncPackets(void)
         if (netchan->type == NETCHAN_OLD) {
             write_reliables_old(client, netchan->maxpacketlen);
         }
+
+        // now fill up remaining buffer space with download
+        write_pending_download(client);
+
         if (netchan->message.cursize || netchan->reliable_ack_pending ||
             netchan->reliable_length || retransmit) {
-            cursize = netchan->Transmit(netchan, 0, NULL, 1);
+            cursize = netchan->Transmit(netchan, 0, "", 1);
             SV_DPrintf(0, "%s: send: %"PRIz"\n", client->name, cursize);
 calctime:
             SV_CalcSendTime(client, cursize);

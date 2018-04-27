@@ -22,7 +22,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "client.h"
 #include "server/mvd/protocol.h"
-#include <setjmp.h>
 
 #define FOR_EACH_GTV(gtv) \
     LIST_FOR_EACH(gtv_t, gtv, &mvd_gtv_list, entry)
@@ -1663,7 +1662,7 @@ void MVD_Spawn(void)
 #endif
 
     // generate spawncount for Waiting Room
-    sv.spawncount = (rand() | (rand() << 16)) ^ Sys_Milliseconds();
+    sv.spawncount = (rand() | ((unsigned)rand() << 16)) ^ Sys_Milliseconds();
     sv.spawncount &= 0x7FFFFFFF;
 
 #if USE_FPS
@@ -1843,8 +1842,10 @@ static void emit_base_frame(mvd_t *mvd)
     MSG_WriteByte(CLIENTNUM_NONE);
 
     // send base entity states
-    for (i = 1; i < mvd->pool.num_edicts; i++) {
+    for (i = 1; i < MAX_EDICTS; i++) {
         ent = &mvd->edicts[i];
+        if (!(ent->svflags & SVF_MONSTER))
+            continue;   // entity never seen
         ent->s.number = i;
         MSG_PackEntity(&es, &ent->s, qfalse);
         MSG_WriteDeltaEntity(NULL, &es, entity_flags(mvd, ent));
@@ -2303,13 +2304,15 @@ static void MVD_Seek_f(void)
     ent->solid = SOLID_BSP;
     ent->inuse = qtrue;
 
-    // relink entities, reset origins and events
-    for (i = 1; i < mvd->pool.num_edicts; i++) {
+    // relink all seen entities, reset old origins and events
+    for (i = 1; i < MAX_EDICTS; i++) {
         ent = &mvd->edicts[i];
+
+        if (ent->svflags & SVF_MONSTER)
+            MVD_LinkEdict(mvd, ent);
+
         if (!ent->inuse)
             continue;
-
-        MVD_LinkEdict(mvd, ent);
 
         if (!(ent->s.renderfx & RF_BEAM))
             VectorCopy(ent->s.origin, ent->s.old_origin);

@@ -238,7 +238,7 @@ int Key_StringToKeynum(const char *str)
     if (!str || !str[0])
         return -1;
     if (!str[1])
-        return str[0];
+        return Q_tolower(str[0]);
 
     for (kn = keynames; kn->name; kn++) {
         if (!Q_stricmp(str, kn->name))
@@ -263,7 +263,8 @@ char *Key_KeynumToString(int keynum)
 
     if (keynum == -1)
         return "<KEY NOT FOUND>";
-    if (keynum > 32 && keynum < 127) {
+
+    if (keynum > 32 && keynum < 127 && keynum != ';' && keynum != '"') {
         // printable ascii
         tinystr[0] = keynum;
         tinystr[1] = 0;
@@ -683,10 +684,10 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
                 Con_Close(qtrue);
             }
         } else if (cls.key_dest & KEY_MENU) {
-            UI_Keydown(key);
+            UI_KeyEvent(key, down);
         } else if (cls.key_dest & KEY_MESSAGE) {
             Key_Message(key);
-        } else if (cls.state == ca_active) {
+        } else if (cls.state >= ca_active) {
             UI_OpenMenu(UIMENU_GAME);
         } else {
             UI_OpenMenu(UIMENU_MAIN);
@@ -707,6 +708,11 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
     // hack for demo freelook in windowed mode
     if (cls.key_dest == KEY_GAME && cls.demo.playback && key == K_SHIFT && keydown[key] <= 1) {
         IN_Activate();
+    }
+
+    // skip the rest of the cinematic
+    if (cls.key_dest == KEY_GAME && cls.state == ca_cinematic && down) {
+        SCR_FinishCinematic();
     }
 
 //
@@ -730,14 +736,6 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
                            kb + 1, key, time);
                 Cbuf_AddText(&cmd_buffer, cmd);
             }
-            if (keyshift[key] != key) {
-                kb = keybindings[keyshift[key]];
-                if (kb && kb[0] == '+') {
-                    Q_snprintf(cmd, sizeof(cmd), "-%s %i %i\n",
-                               kb + 1, key, time);
-                    Cbuf_AddText(&cmd_buffer, cmd);
-                }
-            }
             Q_ClearBit(buttondown, key);
             return;
         }
@@ -749,10 +747,6 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
 
         // generate button up command when released
         Q_SetBit(buttondown, key);
-
-        if (Key_IsDown(K_SHIFT) && keyshift[key] != key && keybindings[keyshift[key]]) {
-            key = keyshift[key];
-        }
 
         kb = keybindings[key];
         if (kb) {
@@ -771,13 +765,16 @@ void Key_Event(unsigned key, qboolean down, unsigned time)
     if (cls.key_dest == KEY_GAME)
         return;
 
-    if (!down)
+    if (!down) {
+        if (cls.key_dest & KEY_MENU)
+            UI_KeyEvent(key, down);
         return;     // other subsystems only care about key down events
+    }
 
     if (cls.key_dest & KEY_CONSOLE) {
         Key_Console(key);
     } else if (cls.key_dest & KEY_MENU) {
-        UI_Keydown(key);
+        UI_KeyEvent(key, down);
     } else if (cls.key_dest & KEY_MESSAGE) {
         Key_Message(key);
     }

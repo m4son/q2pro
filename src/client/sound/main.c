@@ -62,6 +62,7 @@ cvar_t      *s_show;
 
 static cvar_t   *s_enable;
 static cvar_t   *s_auto_focus;
+static cvar_t   *s_swapstereo;
 
 // =======================================================================
 // Console functions
@@ -159,6 +160,7 @@ void S_Init(void)
     s_show = Cvar_Get("s_show", "0", 0);
 #endif
     s_auto_focus = Cvar_Get("s_auto_focus", "0", 0);
+    s_swapstereo = Cvar_Get("s_swapstereo", "0", 0);
 
     // start one of available sound engines
     s_started = SS_NOT;
@@ -462,7 +464,7 @@ static sfx_t *S_RegisterSexedSound(int entnum, const char *base)
     sfx = S_FindName(buffer, len);
 
     // see if it exists
-    if (sfx && !sfx->truename && !S_LoadSound(sfx)) {
+    if (sfx && !sfx->truename && !s_registering && !S_LoadSound(sfx)) {
         // no, revert to the male sound in the pak0.pak
         len = Q_concat(buffer, MAX_QPATH,
                        "sound/player/male/", base + 1, NULL);
@@ -474,6 +476,33 @@ static sfx_t *S_RegisterSexedSound(int entnum, const char *base)
     }
 
     return sfx;
+}
+
+static void S_RegisterSexedSounds(void)
+{
+    int     sounds[MAX_SFX];
+    int     i, j, total;
+    sfx_t   *sfx;
+
+    // find sexed sounds
+    total = 0;
+    for (i = 0, sfx = known_sfx; i < num_sfx; i++, sfx++) {
+        if (sfx->name[0] != '*')
+            continue;
+        if (sfx->registration_sequence != s_registration_sequence)
+            continue;
+        sounds[total++] = i;
+    }
+
+    // register sounds for baseclientinfo and other valid clientinfos
+    for (i = 0; i <= MAX_CLIENTS; i++) {
+        if (i > 0 && !cl.clientinfo[i - 1].model_name[0])
+            continue;
+        for (j = 0; j < total; j++) {
+            sfx = &known_sfx[sounds[j]];
+            S_RegisterSexedSound(i, sfx->name);
+        }
+    }
 }
 
 /*
@@ -490,6 +519,8 @@ void S_EndRegistration(void)
     sfxcache_t *sc;
     int     size;
 #endif
+
+    S_RegisterSexedSounds();
 
     // clear playsound list, so we don't free sfx still present there
     S_StopAllSounds();
@@ -616,6 +647,8 @@ static void S_SpatializeOrigin(const vec3_t origin, float master_vol, float dist
     dist *= dist_mult;      // different attenuation levels
 
     dot = DotProduct(listener_right, source_vec);
+    if (s_swapstereo->integer)
+        dot = -dot;
 
     if (dma.channels == 1 || !dist_mult) {
         // no attenuation = no spatialization
@@ -871,7 +904,7 @@ void S_StartLocalSound(const char *sound)
 {
     if (s_started) {
         qhandle_t sfx = S_RegisterSound(sound);
-        S_StartSound(NULL, listener_entnum, 0, sfx, 1, 1, 0);
+        S_StartSound(NULL, listener_entnum, 0, sfx, 1, ATTN_NONE, 0);
     }
 }
 
@@ -879,7 +912,7 @@ void S_StartLocalSound_(const char *sound)
 {
     if (s_started) {
         qhandle_t sfx = S_RegisterSound(sound);
-        S_StartSound(NULL, listener_entnum, 256, sfx, 1, 1, 0);
+        S_StartSound(NULL, listener_entnum, 256, sfx, 1, ATTN_NONE, 0);
     }
 }
 
@@ -958,7 +991,7 @@ as the entities are sent to the client
 static void S_AddLoopSounds(void)
 {
     int         i, j;
-    int         sounds[MAX_PACKET_ENTITIES];
+    int         sounds[MAX_EDICTS];
     int         left, right, left_total, right_total;
     channel_t   *ch;
     sfx_t       *sfx;

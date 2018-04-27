@@ -81,7 +81,7 @@ Archived in MVD stream.
 static void PF_Unicast(edict_t *ent, qboolean reliable)
 {
     client_t    *client;
-    int         clientNum;
+    int         cmd, flags, clientNum;
 
     if (!ent) {
         goto clear;
@@ -99,10 +99,26 @@ static void PF_Unicast(edict_t *ent, qboolean reliable)
         goto clear;
     }
 
-    SV_ClientAddMessage(client, reliable ? MSG_RELIABLE : 0);
+    if (!msg_write.cursize) {
+        Com_DPrintf("%s with empty data\n", __func__);
+        goto clear;
+    }
 
-    if (msg_write.data[0] == svc_disconnect) {
-        // fix anti-kicking exploit for broken mods
+    cmd = msg_write.data[0];
+
+    flags = 0;
+    if (reliable) {
+        flags |= MSG_RELIABLE;
+    }
+
+    if (cmd == svc_layout) {
+        flags |= MSG_COMPRESS;
+    }
+
+    SV_ClientAddMessage(client, flags);
+
+    // fix anti-kicking exploit for broken mods
+    if (cmd == svc_disconnect) {
         client->drop_hack = qtrue;
         goto clear;
     }
@@ -911,6 +927,7 @@ void SV_InitGameProgs(void)
     if (!ge) {
         Com_Error(ERR_DROP, "Game DLL returned NULL exports");
     }
+
     if (ge->apiversion != GAME_API_VERSION) {
         Com_Error(ERR_DROP, "Game DLL is version %d, expected %d",
                   ge->apiversion, GAME_API_VERSION);
@@ -918,6 +935,11 @@ void SV_InitGameProgs(void)
 
     // initialize
     ge->Init();
+
+    // sanitize edict_size
+    if (ge->edict_size < sizeof(edict_t) || ge->edict_size > SIZE_MAX / MAX_EDICTS) {
+        Com_Error(ERR_DROP, "Game DLL returned bad size of edict_t");
+    }
 
     // sanitize max_edicts
     if (ge->max_edicts <= sv_maxclients->integer || ge->max_edicts > MAX_EDICTS) {

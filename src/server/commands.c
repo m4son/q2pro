@@ -257,64 +257,47 @@ another level:
     map tram.cin+jail_e3
 ======================
 */
-static void SV_Map(int argnum, qboolean restart)
+
+static void abort_func(void *arg)
 {
-    char    mapcmd[MAX_QPATH];
-    char    expanded[MAX_QPATH];
-    char    *s, *ch, *spawnpoint;
-    cm_t    cm;
-    qerror_t ret;
-    size_t  len;
+    CM_FreeMap(arg);
+}
+
+static void SV_Map(qboolean restart)
+{
+    mapcmd_t    cmd;
+    size_t      len;
+
+    memset(&cmd, 0, sizeof(cmd));
 
     // save the mapcmd
-    len = Cmd_ArgvBuffer(argnum, mapcmd, sizeof(mapcmd));
-    if (len >= sizeof(mapcmd)) {
+    len = Cmd_ArgvBuffer(1, cmd.buffer, sizeof(cmd.buffer));
+    if (len >= sizeof(cmd.buffer)) {
         Com_Printf("Refusing to process oversize level string.\n");
         return;
     }
 
-    s = mapcmd;
-
-    // if there is a + in the map, set nextserver to the remainder
-    // we go directly to nextserver as we don't support cinematics
-    ch = strchr(s, '+');
-    if (ch) {
-        s = ch + 1;
-    }
-
-    // skip the end-of-unit flag if necessary
-    if (*s == '*') {
-        s++;
-    }
-
-    // if there is a $, use the remainder as a spawnpoint
-    ch = strchr(s, '$');
-    if (ch) {
-        *ch = 0;
-        spawnpoint = ch + 1;
-    } else {
-        spawnpoint = mapcmd + len;
-    }
-
-    // now expand and try to load the map
-    len = Q_concat(expanded, sizeof(expanded), "maps/", s, ".bsp", NULL);
-    if (len >= sizeof(expanded)) {
-        ret = Q_ERR_NAMETOOLONG;
-    } else {
-        ret = CM_LoadMap(&cm, expanded);
-    }
-
-    if (ret) {
-        Com_Printf("Couldn't load %s: %s\n", expanded, Q_ErrorString(ret));
+    if (!SV_ParseMapCmd(&cmd))
         return;
-    }
+
+    // save pending CM to be freed later if ERR_DROP is thrown
+    Com_AbortFunc(abort_func, &cmd.cm);
+
+    // wipe savegames
+    cmd.endofunit |= restart;
+
+    SV_AutoSaveBegin(&cmd);
 
     // any error will drop from this point
-    if (sv.state != ss_game || restart) {
+    if ((sv.state != ss_game && sv.state != ss_pic) || restart)
         SV_InitGame(MVD_SPAWN_DISABLED);    // the game is just starting
-    }
 
-    SV_SpawnServer(&cm, s, spawnpoint);
+    // clear pending CM
+    Com_AbortFunc(NULL, NULL);
+
+    SV_SpawnServer(&cmd);
+
+    SV_AutoSaveEnd();
 }
 
 /*
@@ -366,19 +349,19 @@ static void SV_GameMap_f(void)
         if (sv_recycle->integer > 1) {
             Com_Quit(NULL, ERR_RECONNECT);
         }
-        SV_Map(1, qtrue);
+        SV_Map(qtrue);
         return;
     }
 #endif
 
-    SV_Map(1, qfalse);
+    SV_Map(qfalse);
 }
 
 static int should_really_restart(void)
 {
     static qboolean warned;
 
-    if (sv.state != ss_game)
+    if (sv.state != ss_game && sv.state != ss_pic)
         return 1;   // the game is just starting
 
 #if !USE_CLIENT
@@ -434,7 +417,7 @@ static void SV_Map_f(void)
     if (res < 0)
         return;
 
-    SV_Map(1, !!res);
+    SV_Map(!!res);
 }
 
 static void SV_Map_c(genctx_t *ctx, int argnum)
@@ -467,6 +450,8 @@ static void SV_DumpEnts_f(void)
 
 //===============================================================
 
+static void make_mask(netadr_t *mask, netadrtype_t type, int bits);
+
 /*
 ==================
 SV_Kick_f
@@ -495,10 +480,10 @@ static void SV_Kick_f(void)
     // optionally ban their IP address
     if (!strcmp(Cmd_Argv(0), "kickban")) {
         netadr_t *addr = &sv_client->netchan->remote_address;
-        if (addr->type == NA_IP) {
+        if (addr->type == NA_IP || addr->type == NA_IP6) {
             addrmatch_t *match = Z_Malloc(sizeof(*match));
-            match->addr.u32 = addr->ip.u32;
-            match->mask = 0xffffffffU;
+            match->addr = *addr;
+            make_mask(&match->mask, addr->type, addr->type == NA_IP6 ? 128 : 32);
             match->hits = 0;
             match->time = 0;
             match->comment[0] = 0;
@@ -604,16 +589,20 @@ static void dump_time(void)
     client_t    *client;
     char        buffer[MAX_QPATH];
     time_t      clock = time(NULL);
+    unsigned    idle;
 
     Com_Printf(
-        "num name            time\n"
-        "--- --------------- --------\n");
+        "num name            idle time\n"
+        "--- --------------- ---- --------\n");
 
     FOR_EACH_CLIENT(client) {
+        idle = (svs.realtime - client->lastactivity) / 1000;
+        if (idle > 9999)
+            idle = 9999;
         Com_TimeDiff(buffer, sizeof(buffer),
                      &client->connect_time, clock);
-        Com_Printf("%3i %-15.15s %s\n",
-                   client->number, client->name, buffer);
+        Com_Printf("%3i %-15.15s %4u %s\n",
+                   client->number, client->name, idle, buffer);
     }
 }
 
@@ -999,15 +988,20 @@ static void SV_ServerCommand_f(void)
     ge->ServerCommand();
 }
 
-// (ip & mask) == (addr & mask)
-// bits = 32 --> mask = 255.255.255.255
-// bits = 24 --> mask = 255.255.255.0
-
-static qboolean parse_mask(const char *s, uint32_t *addr, uint32_t *mask)
+static void make_mask(netadr_t *mask, netadrtype_t type, int bits)
 {
-    netadr_t address;
+    memset(mask, 0, sizeof(*mask));
+    mask->type = type;
+    memset(mask->ip.u8, 0xff, bits >> 3);
+    if (bits & 7) {
+        mask->ip.u8[bits >> 3] = ~((1 << (8 - (bits & 7))) - 1);
+    }
+}
+
+static qboolean parse_mask(char *s, netadr_t *addr, netadr_t *mask)
+{
+    int bits, size;
     char *p;
-    int bits;
 
     p = strchr(s, '/');
     if (p) {
@@ -1017,45 +1011,67 @@ static qboolean parse_mask(const char *s, uint32_t *addr, uint32_t *mask)
             return qfalse;
         }
         bits = atoi(p);
-        if (bits < 1 || bits > 32) {
-            Com_Printf("Bad mask: %d bits\n", bits);
-            return qfalse;
-        }
     } else {
-        bits = 32;
+        bits = -1;
     }
 
-    if (!NET_StringToAdr(s, &address, 0)) {
+    if (!NET_StringToBaseAdr(s, addr)) {
         Com_Printf("Bad address: %s\n", s);
         return qfalse;
     }
 
-    *addr = address.ip.u32;
-    *mask = BigLong(~((1 << (32 - bits)) - 1));
+    size = (addr->type == NA_IP6) ? 128 : 32;
+
+    if (bits == -1) {
+        bits = size;
+    }
+
+    if (bits < 1 || bits > size) {
+        Com_Printf("Bad mask: %d bits\n", bits);
+        return qfalse;
+    }
+
+    make_mask(mask, addr->type, bits);
     return qtrue;
 }
 
-static size_t format_mask(addrmatch_t *match, char *buf, size_t size)
+static size_t format_mask(addrmatch_t *match, char *buf, size_t buf_size)
 {
-    uint8_t *ip = match->addr.u8;
-    uint32_t mask = BigLong(match->mask);
-    int i;
+    int i, j, bits, size;
 
-    for (i = 0; i < 32; i++) {
-        if (mask & (1 << i)) {
+    size = (match->mask.type == NA_IP6) ? 128 : 32;
+    bits = 0;
+
+    for (i = 0; i < size >> 3; i++) {
+        int c = match->mask.ip.u8[i];
+
+        if (c == 0xff) {
+            bits += 8;
+            continue;
+        }
+
+        if (c == 0) {
             break;
         }
+
+        for (j = 0; j < 8; j++) {
+            if (!(c & (1 << (7 - j)))) {
+                break;
+            }
+        }
+
+        bits += j;
+        break;
     }
 
-    return Q_snprintf(buf, size, "%d.%d.%d.%d/%d",
-                      ip[0], ip[1], ip[2], ip[3], 32 - i);
+    return Q_snprintf(buf, buf_size, "%s/%d", NET_BaseAdrToString(&match->addr), bits);
 }
 
 void SV_AddMatch_f(list_t *list)
 {
-    char *s, buf[32];
+    char *s, buf[MAX_QPATH];
     addrmatch_t *match;
-    uint32_t addr, mask;
+    netadr_t addr, mask;
     size_t len;
 
     if (Cmd_Argc() < 2) {
@@ -1069,7 +1085,8 @@ void SV_AddMatch_f(list_t *list)
     }
 
     LIST_FOR_EACH(addrmatch_t, match, list, entry) {
-        if (match->addr.u32 == addr && match->mask == mask) {
+        if (NET_IsEqualBaseAdr(&match->addr, &addr) &&
+            NET_IsEqualBaseAdr(&match->mask, &mask)) {
             format_mask(match, buf, sizeof(buf));
             Com_Printf("Entry %s already exists.\n", buf);
             return;
@@ -1079,7 +1096,7 @@ void SV_AddMatch_f(list_t *list)
     s = Cmd_ArgsFrom(2);
     len = strlen(s);
     match = Z_Malloc(sizeof(*match) + len);
-    match->addr.u32 = addr;
+    match->addr = addr;
     match->mask = mask;
     match->hits = 0;
     match->time = 0;
@@ -1091,7 +1108,7 @@ void SV_DelMatch_f(list_t *list)
 {
     char *s;
     addrmatch_t *match, *next;
-    uint32_t addr, mask;
+    netadr_t addr, mask;
     int i;
 
     if (Cmd_Argc() < 2) {
@@ -1133,7 +1150,8 @@ void SV_DelMatch_f(list_t *list)
     }
 
     LIST_FOR_EACH(addrmatch_t, match, list, entry) {
-        if (match->addr.u32 == addr && match->mask == mask) {
+        if (NET_IsEqualBaseAdr(&match->addr, &addr) &&
+            NET_IsEqualBaseAdr(&match->mask, &mask)) {
 remove:
             List_Remove(&match->entry);
             Z_Free(match);
@@ -1146,8 +1164,8 @@ remove:
 void SV_ListMatches_f(list_t *list)
 {
     addrmatch_t *match;
-    char last[32];
-    char addr[32];
+    char last[MAX_QPATH];
+    char addr[MAX_QPATH];
     int count;
 
     if (LIST_EMPTY(list)) {
@@ -1545,10 +1563,6 @@ static const cmdreg_t c_server[] = {
     { "addfiltercmd", SV_AddFilterCmd_f, SV_AddFilterCmd_c },
     { "delfiltercmd", SV_DelFilterCmd_f, SV_DelFilterCmd_c },
     { "listfiltercmds", SV_ListFilterCmds_f },
-#if USE_CLIENT
-    { "savegame", SV_Savegame_f },
-    { "loadgame", SV_Loadgame_f },
-#endif
 #if USE_MVD_CLIENT || USE_MVD_SERVER
     { "mvdrecord", SV_Record_f, SV_Record_c },
     { "mvdstop", SV_Stop_f },

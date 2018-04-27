@@ -19,10 +19,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "server.h"
 
-#if USE_FPS
-static void align_key_frames(void);
-#endif
-
 /*
 ============================================================
 
@@ -408,7 +404,10 @@ void SV_New_f(void)
     MSG_WriteLong(sv_client->spawncount);
     MSG_WriteByte(0);   // no attract loop
     MSG_WriteString(sv_client->gamedir);
-    MSG_WriteShort(sv_client->slot);
+    if (sv.state == ss_pic)
+        MSG_WriteShort(-1);
+    else
+        MSG_WriteShort(sv_client->slot);
     MSG_WriteString(&sv_client->configstrings[CS_NAME * MAX_QPATH]);
 
     // send protocol specific stuff
@@ -421,7 +420,7 @@ void SV_New_f(void)
         break;
     case PROTOCOL_VERSION_Q2PRO:
         MSG_WriteShort(sv_client->version);
-        MSG_WriteByte(2);   // used to be GT_DEATHMATCH
+        MSG_WriteByte(sv.state);
         MSG_WriteByte(sv_client->pmp.strafehack);
         MSG_WriteByte(sv_client->pmp.qwmode);
         if (sv_client->version >= PROTOCOL_VERSION_Q2PRO_WATERJUMP_HACK) {
@@ -457,6 +456,9 @@ void SV_New_f(void)
     sv_client->state = cs_primed;
 
     memset(&sv_client->lastcmd, 0, sizeof(sv_client->lastcmd));
+
+    if (sv.state == ss_pic)
+        return;
 
 #if USE_ZLIB
     if (sv_client->has_zlib) {
@@ -519,9 +521,8 @@ void SV_Begin_f(void)
     sv_client->command_msec = 1800;
     sv_client->suppress_count = 0;
     sv_client->http_download = qfalse;
-#if USE_FPS
-    align_key_frames();
-#endif
+
+    SV_AlignKeyFrames(sv_client);
 
     stuff_cmds(&sv_cmdlist_begin);
 
@@ -532,8 +533,6 @@ void SV_Begin_f(void)
 }
 
 //=============================================================================
-
-#define MAX_DOWNLOAD_CHUNK    1024
 
 void SV_CloseDownload(client_t *client)
 {
@@ -547,6 +546,8 @@ void SV_CloseDownload(client_t *client)
     }
     client->downloadsize = 0;
     client->downloadcount = 0;
+    client->downloadcmd = 0;
+    client->downloadpending = qfalse;
 }
 
 /*
@@ -556,37 +557,10 @@ SV_NextDownload_f
 */
 static void SV_NextDownload_f(void)
 {
-    int     r;
-    int     percent;
-    int     size;
-
     if (!sv_client->download)
         return;
 
-    r = sv_client->downloadsize - sv_client->downloadcount;
-    if (r > MAX_DOWNLOAD_CHUNK)
-        r = MAX_DOWNLOAD_CHUNK;
-
-    MSG_WriteByte(svc_download);
-    MSG_WriteShort(r);
-
-    sv_client->downloadcount += r;
-    size = sv_client->downloadsize;
-    if (!size)
-        size = 1;
-    percent = sv_client->downloadcount * 100 / size;
-    MSG_WriteByte(percent);
-    MSG_WriteData(sv_client->download + sv_client->downloadcount - r, r);
-
-    if (sv_client->downloadcount == sv_client->downloadsize) {
-        SV_CloseDownload(sv_client);
-#if USE_FPS
-        if (sv_client->state == cs_spawned)
-            align_key_frames();
-#endif
-    }
-
-    SV_ClientAddMessage(sv_client, MSG_RELIABLE | MSG_CLEAR);
+    sv_client->downloadpending = qtrue;
 }
 
 /*
@@ -598,11 +572,11 @@ static void SV_BeginDownload_f(void)
 {
     char    name[MAX_QPATH];
     byte    *download;
+    int     downloadcmd;
     ssize_t downloadsize, maxdownloadsize, result;
     int     offset = 0;
     cvar_t  *allow;
     size_t  len;
-    unsigned flags;
     qhandle_t f;
 
     len = Cmd_ArgvBuffer(1, name, sizeof(name));
@@ -668,18 +642,28 @@ static void SV_BeginDownload_f(void)
         SV_CloseDownload(sv_client);
     }
 
-    flags = FS_MODE_READ;
+    f = 0;
+    downloadcmd = svc_download;
 
-    // special check for maps, if it came from a pak file, don't allow
-    // download  ZOID
-    if (allow == allow_download_maps && allow->integer < 2) {
-        flags |= FS_TYPE_REAL;
+#if USE_ZLIB
+    // prefer raw deflate stream from .pkz if supported
+    if (sv_client->protocol == PROTOCOL_VERSION_Q2PRO &&
+        sv_client->version >= PROTOCOL_VERSION_Q2PRO_ZLIB_DOWNLOADS &&
+        sv_client->has_zlib && offset == 0) {
+        downloadsize = FS_FOpenFile(name, &f, FS_MODE_READ | FS_FLAG_DEFLATE);
+        if (f) {
+            Com_DPrintf("Serving compressed download to %s\n", sv_client->name);
+            downloadcmd = svc_zdownload;
+        }
     }
+#endif
 
-    downloadsize = FS_FOpenFile(name, &f, flags);
     if (!f) {
-        Com_DPrintf("Couldn't download %s to %s\n", name, sv_client->name);
-        goto fail1;
+        downloadsize = FS_FOpenFile(name, &f, FS_MODE_READ);
+        if (!f) {
+            Com_DPrintf("Couldn't download %s to %s\n", name, sv_client->name);
+            goto fail1;
+        }
     }
 
     maxdownloadsize = MAX_LOADFILE;
@@ -688,6 +672,11 @@ static void SV_BeginDownload_f(void)
         maxdownloadsize = Cvar_ClampInteger(sv_max_download_size, 1, MAX_LOADFILE);
     }
 #endif
+
+    if (downloadsize == 0) {
+        Com_DPrintf("Refusing empty download of %s to %s\n", name, sv_client->name);
+        goto fail2;
+    }
 
     if (downloadsize > maxdownloadsize) {
         Com_DPrintf("Refusing oversize download of %s to %s\n", name, sv_client->name);
@@ -726,10 +715,10 @@ static void SV_BeginDownload_f(void)
     sv_client->downloadsize = downloadsize;
     sv_client->downloadcount = offset;
     sv_client->downloadname = SV_CopyString(name);
+    sv_client->downloadcmd = downloadcmd;
+    sv_client->downloadpending = qtrue;
 
     Com_DPrintf("Downloading %s to %s\n", name, sv_client->name);
-
-    SV_NextDownload_f();
     return;
 
 fail3:
@@ -745,18 +734,12 @@ fail1:
 
 static void SV_StopDownload_f(void)
 {
-    int size, percent;
+    int percent;
 
-    if (!sv_client->download) {
+    if (!sv_client->download)
         return;
-    }
 
-    size = sv_client->downloadsize;
-    if (!size) {
-        percent = 0;
-    } else {
-        percent = sv_client->downloadcount * 100 / size;
-    }
+    percent = sv_client->downloadcount * 100 / sv_client->downloadsize;
 
     MSG_WriteByte(svc_download);
     MSG_WriteShort(-1);
@@ -766,14 +749,30 @@ static void SV_StopDownload_f(void)
     Com_DPrintf("Download of %s to %s stopped by user request\n",
                 sv_client->downloadname, sv_client->name);
     SV_CloseDownload(sv_client);
-
-#if USE_FPS
-    if (sv_client->state == cs_spawned)
-        align_key_frames();
-#endif
+    SV_AlignKeyFrames(sv_client);
 }
 
 //============================================================================
+
+// special hack for end game screen in coop mode
+static void SV_NextServer_f(void)
+{
+    if (sv.state != ss_pic)
+        return;     // can't nextserver while playing a normal game
+
+    if (Q_stricmp(sv.name, "victory.pcx"))
+        return;
+
+    if (Cvar_VariableInteger("deathmatch"))
+        return;
+
+    sv.name[0] = 0; // make sure another doesn't sneak in
+
+    if (Cvar_VariableInteger("coop"))
+        Cbuf_AddText(&cmd_buffer, "gamemap \"*base1\"\n");
+    else
+        Cbuf_AddText(&cmd_buffer, "killserver\n");
+}
 
 // the client is going to disconnect, so remove the connection immediately
 static void SV_Disconnect_f(void)
@@ -805,10 +804,7 @@ static void SV_ShowMiscInfo_f(void)
 static void SV_NoGameData_f(void)
 {
     sv_client->nodata ^= 1;
-#if USE_FPS
-    if (sv_client->state == cs_spawned)
-        align_key_frames();
-#endif
+    SV_AlignKeyFrames(sv_client);
 }
 
 static void SV_Lag_f(void)
@@ -909,7 +905,7 @@ static const ucmd_t ucmds[] = {
     { "begin", SV_Begin_f },
     { "baselines", NULL },
     { "configstrings", NULL },
-    { "nextserver", NULL },
+    { "nextserver", SV_NextServer_f },
     { "disconnect", SV_Disconnect_f },
 
     // issued by hand at client consoles
@@ -985,15 +981,27 @@ static void SV_ExecuteUserCommand(const char *s)
         }
         return;
     }
-    if (sv.state < ss_game) {
+
+    if (sv.state == ss_pic) {
         return;
     }
+
+    if (sv_client->state != cs_spawned && !sv_allow_unconnected_cmds->integer) {
+        return;
+    }
+
     LIST_FOR_EACH(filtercmd_t, filter, &sv_filterlist, entry) {
         if (!Q_stricmp(filter->string, c)) {
             handle_filtercmd(filter);
             return;
         }
     }
+
+    if (!strcmp(c, "say") || !strcmp(c, "say_team")) {
+        // don't timeout. only chat commands count as activity.
+        sv_client->lastactivity = svs.realtime;
+    }
+
     ge->ClientCommand(sv_player);
 }
 
@@ -1016,6 +1024,8 @@ SV_ClientThink
 */
 static inline void SV_ClientThink(usercmd_t *cmd)
 {
+    usercmd_t *old = &sv_client->lastcmd;
+
     sv_client->command_msec -= cmd->msec;
     sv_client->num_moves++;
 
@@ -1023,6 +1033,14 @@ static inline void SV_ClientThink(usercmd_t *cmd)
         Com_DPrintf("commandMsec underflow from %s: %d\n",
                     sv_client->name, sv_client->command_msec);
         return;
+    }
+
+    if (cmd->buttons != old->buttons
+        || cmd->forwardmove != old->forwardmove
+        || cmd->sidemove != old->sidemove
+        || cmd->upmove != old->upmove) {
+        // don't timeout
+        sv_client->lastactivity = svs.realtime;
     }
 
     ge->ClientThink(sv_player, cmd);
@@ -1231,7 +1249,7 @@ static void SV_NewClientExecuteMove(int c)
 =================
 SV_UpdateUserinfo
 
-Ensures that name and ip are properly set.
+Ensures that userinfo is valid and name is properly set.
 =================
 */
 static void SV_UpdateUserinfo(void)
@@ -1266,13 +1284,6 @@ static void SV_UpdateUserinfo(void)
         else
             SV_ClientPrintf(sv_client, PRINT_HIGH, "You can't change your name too often.\n");
         SV_ClientCommand(sv_client, "set name \"%s\"\n", sv_client->name);
-    }
-
-    // force the IP key/value pair so the game can filter based on ip
-    s = NET_AdrToString(&sv_client->netchan->remote_address);
-    if (!Info_SetValueForKey(sv_client->userinfo, "ip", s)) {
-        SV_DropClient(sv_client, "oversize userinfo");
-        return;
     }
 
     SV_UserinfoChanged(sv_client);
@@ -1356,16 +1367,16 @@ static void SV_ParseDeltaUserinfo(void)
 }
 
 #if USE_FPS
-static void align_key_frames(void)
+void SV_AlignKeyFrames(client_t *client)
 {
-    int framediv = sv.framediv / sv_client->framediv;
-    int framenum = sv.framenum / sv_client->framediv;
+    int framediv = sv.framediv / client->framediv;
+    int framenum = sv.framenum / client->framediv;
     int frameofs = framenum % framediv;
-    int newnum = frameofs + Q_align(sv_client->framenum, framediv);
+    int newnum = frameofs + Q_align(client->framenum, framediv);
 
     Com_DPrintf("[%d] align %d --> %d (num = %d, div = %d, ofs = %d)\n",
-                sv.framenum, sv_client->framenum, newnum, framenum, framediv, frameofs);
-    sv_client->framenum = newnum;
+                sv.framenum, client->framenum, newnum, framenum, framediv, frameofs);
+    client->framenum = newnum;
 }
 
 static void set_client_fps(int value)
@@ -1388,8 +1399,7 @@ static void set_client_fps(int value)
 
     sv_client->framediv = framediv;
 
-    if (sv_client->state == cs_spawned)
-        align_key_frames();
+    SV_AlignKeyFrames(sv_client);
 
     // save for status inspection
     sv_client->settings[CLS_FPS] = framerate;

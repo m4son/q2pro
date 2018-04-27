@@ -88,18 +88,22 @@ with this program; if not, write to the Free Software Foundation, Inc.,
     } while (count)
 
 typedef struct {
-    color_t colors[2];
-    clipRect_t clipRect;
-    int flags;
+    color_t     colors[2];
+    clipRect_t  clip;
 } drawStatic_t;
 
 static drawStatic_t draw;
 
-void R_SetScale(float *scale)
+float R_ClampScale(cvar_t *var)
 {
-    if (scale) {
-        *scale = 1;
+    if (var) {
+        Cvar_SetValue(var, 1.0f, FROM_CODE);
     }
+    return 1.0f;
+}
+
+void R_SetScale(float scale)
+{
 }
 
 void R_InitDraw(void)
@@ -107,6 +111,10 @@ void R_InitDraw(void)
     memset(&draw, 0, sizeof(draw));
     draw.colors[0].u32 = U32_WHITE;
     draw.colors[1].u32 = U32_WHITE;
+    draw.clip.left = 0;
+    draw.clip.top = 0;
+    draw.clip.right = r_config.width;
+    draw.clip.bottom = r_config.height;
 }
 
 void R_ClearColor(void)
@@ -127,15 +135,31 @@ void R_SetColor(uint32_t color)
     draw.colors[1].u8[3] = draw.colors[0].u8[3];
 }
 
-void R_SetClipRect(int flags, const clipRect_t *clip)
+void R_SetClipRect(const clipRect_t *clip)
 {
-    draw.flags &= ~DRAW_CLIP_MASK;
-
-    if (flags == DRAW_CLIP_DISABLED) {
+    if (!clip) {
+clear:
+        draw.clip.left = 0;
+        draw.clip.top = 0;
+        draw.clip.right = r_config.width;
+        draw.clip.bottom = r_config.height;
         return;
     }
-    draw.flags |= flags;
-    draw.clipRect = *clip;
+
+    draw.clip = *clip;
+
+    if (draw.clip.left < 0)
+        draw.clip.left = 0;
+    if (draw.clip.top < 0)
+        draw.clip.top = 0;
+    if (draw.clip.right > r_config.width)
+        draw.clip.right = r_config.width;
+    if (draw.clip.bottom > r_config.height)
+        draw.clip.bottom = r_config.height;
+    if (draw.clip.right < draw.clip.left)
+        goto clear;
+    if (draw.clip.bottom < draw.clip.top)
+        goto clear;
 }
 
 /*
@@ -149,59 +173,29 @@ static void R_DrawStretchData(int x, int y, int w, int h, int xx, int yy,
     byte    *srcpixels, *dstpixels, *dst, *src;
     int     v, u;
     int     ustep, vstep;
-    int     skipv, skipu;
-    int     width, height;
+    int     skipv = 0, skipu = 0;
+    int     width = w, height = h;
     int     count;
     byte    *_src;
     int     tmp[4];
 
-    skipv = skipu = 0;
-    width = w;
-    height = h;
-
-    if (draw.flags & DRAW_CLIP_MASK) {
-        clipRect_t *clip = &draw.clipRect;
-
-        if (draw.flags & DRAW_CLIP_LEFT) {
-            if (x < clip->left) {
-                skipu = clip->left - x;
-                if (w <= skipu) {
-                    return;
-                }
-                w -= skipu;
-                x = clip->left;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_RIGHT) {
-            if (x >= clip->right) {
-                return;
-            }
-            if (x + w > clip->right) {
-                w = clip->right - x;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_TOP) {
-            if (y < clip->top) {
-                skipv = clip->top - y;
-                if (h <= skipv) {
-                    return;
-                }
-                h -= skipv;
-                y = clip->top;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_BOTTOM) {
-            if (y >= clip->bottom) {
-                return;
-            }
-            if (y + h > clip->bottom) {
-                h = clip->bottom - y;
-            }
-        }
+    if (x < draw.clip.left) {
+        skipu = draw.clip.left - x;
+        w -= skipu;
+        x = draw.clip.left;
     }
+    if (y < draw.clip.top) {
+        skipv = draw.clip.top - y;
+        h -= skipv;
+        y = draw.clip.top;
+    }
+
+    if (x + w > draw.clip.right)
+        w = draw.clip.right - x;
+    if (y + h > draw.clip.bottom)
+        h = draw.clip.bottom - y;
+    if (w <= 0 || h <= 0)
+        return;
 
     srcpixels = data + yy * pitch + xx * TEX_BYTES;
     dstpixels = vid.buffer + y * vid.rowbytes + x * VID_BYTES;
@@ -302,55 +296,27 @@ static void R_DrawFixedData(int x, int y, int w, int h,
 {
     byte    *srcpixels, *dstpixels;
     byte    *dst, *src;
-    int     skipv, skipu;
+    int     skipv = 0, skipu = 0;
     int     count;
     int     tmp[4];
 
-    skipv = skipu = 0;
-
-    if (draw.flags & DRAW_CLIP_MASK) {
-        clipRect_t *clip = &draw.clipRect;
-
-        if (draw.flags & DRAW_CLIP_LEFT) {
-            if (x < clip->left) {
-                skipu = clip->left - x;
-                if (w <= skipu) {
-                    return;
-                }
-                w -= skipu;
-                x = clip->left;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_RIGHT) {
-            if (x >= clip->right) {
-                return;
-            }
-            if (x + w > clip->right) {
-                w = clip->right - x;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_TOP) {
-            if (y < clip->top) {
-                skipv = clip->top - y;
-                if (h <= skipv) {
-                    return;
-                }
-                h -= skipv;
-                y = clip->top;
-            }
-        }
-
-        if (draw.flags & DRAW_CLIP_BOTTOM) {
-            if (y >= clip->bottom) {
-                return;
-            }
-            if (y + h > clip->bottom) {
-                h = clip->bottom - y;
-            }
-        }
+    if (x < draw.clip.left) {
+        skipu = draw.clip.left - x;
+        w -= skipu;
+        x = draw.clip.left;
     }
+    if (y < draw.clip.top) {
+        skipv = draw.clip.top - y;
+        h -= skipv;
+        y = draw.clip.top;
+    }
+
+    if (x + w > draw.clip.right)
+        w = draw.clip.right - x;
+    if (y + h > draw.clip.bottom)
+        h = draw.clip.bottom - y;
+    if (w <= 0 || h <= 0)
+        return;
 
     srcpixels = data + skipv * pitch + skipu * TEX_BYTES;
     dstpixels = vid.buffer + y * vid.rowbytes + x * VID_BYTES;
@@ -444,7 +410,7 @@ void R_DrawPic(int x, int y, qhandle_t pic)
                           image->upload_width * TEX_BYTES, image->pixels[0], draw.colors[0]);
 }
 
-static inline void draw_char(int x, int y, int ch, qboolean alt, image_t *image)
+static inline void draw_char(int x, int y, int flags, int ch, image_t *image)
 {
     int x2, y2;
     byte *data;
@@ -452,12 +418,17 @@ static inline void draw_char(int x, int y, int ch, qboolean alt, image_t *image)
     if ((ch & 127) == 32)
         return;
 
-    ch |= alt << 7;
+    if (flags & UI_ALTCOLOR)
+        ch |= 0x80;
+
+    if (flags & UI_XORCOLOR)
+        ch ^= 0x80;
+
     x2 = (ch & 15) * CHAR_WIDTH;
     y2 = ((ch >> 4) & 15) * CHAR_HEIGHT;
     data = image->pixels[0] + y2 * image->upload_width * TEX_BYTES + x2 * TEX_BYTES;
 
-    R_DrawFixedData(x, y, CHAR_WIDTH, CHAR_HEIGHT, image->upload_width * TEX_BYTES, data, draw.colors[alt]);
+    R_DrawFixedData(x, y, CHAR_WIDTH, CHAR_HEIGHT, image->upload_width * TEX_BYTES, data, draw.colors[ch >> 7]);
 }
 
 void R_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
@@ -471,7 +442,7 @@ void R_DrawChar(int x, int y, int flags, int ch, qhandle_t font)
     if (image->upload_width != 128 || image->upload_height != 128)
         return;
 
-    draw_char(x, y, ch, !!(flags & UI_ALTCOLOR), image);
+    draw_char(x, y, flags, ch & 255, image);
 }
 
 /*
@@ -483,7 +454,6 @@ int R_DrawString(int x, int y, int flags, size_t maxChars,
                  const char *string, qhandle_t font)
 {
     image_t *image;
-    qboolean alt;
 
     if (!font)
         return x;
@@ -492,11 +462,9 @@ int R_DrawString(int x, int y, int flags, size_t maxChars,
     if (image->upload_width != 128 || image->upload_height != 128)
         return x;
 
-    alt = (flags & UI_ALTCOLOR) ? qtrue : qfalse;
-
     while (maxChars-- && *string) {
         byte c = *string++;
-        draw_char(x, y, c, alt, image);
+        draw_char(x, y, flags, c, image);
         x += CHAR_WIDTH;
     }
 

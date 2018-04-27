@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef REFRESH_H
 #define REFRESH_H
 
+#include "common/cvar.h"
 #include "common/error.h"
 
 #define MAX_DLIGHTS     32
@@ -46,10 +47,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define SHELL_WHITE_COLOR   0xD7
 
+// NOTE: these flags are intentionally the same value
 #define RF_LEFTHAND         0x80000000
+#define RF_NOSHADOW         0x80000000
 
 #define RF_SHELL_MASK       (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | \
                              RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM)
+
+#define DLIGHT_CUTOFF       64
 
 typedef struct entity_s {
     qhandle_t           model;          // opaque type outside refresh
@@ -74,9 +79,7 @@ typedef struct entity_s {
     int     skinnum;                // also used as RF_BEAM's palette index,
                                     // -1 => use rgba
 
-    int     lightstyle;             // for flashing entities
     float   alpha;                  // ignore if RF_TRANSLUCENT isn't set
-
     color_t rgba;
 
     qhandle_t   skin;           // NULL for inline skin
@@ -142,13 +145,6 @@ typedef struct {
 
 extern refcfg_t r_config;
 
-#define DRAW_CLIP_DISABLED  0
-#define DRAW_CLIP_LEFT      0x00000004
-#define DRAW_CLIP_RIGHT     0x00000008
-#define DRAW_CLIP_TOP       0x00000010
-#define DRAW_CLIP_BOTTOM    0x00000020
-#define DRAW_CLIP_MASK      0x0000003C
-
 typedef struct {
     int left, right, top, bottom;
 } clipRect_t;
@@ -158,7 +154,12 @@ typedef enum {
     IF_PERMANENT    = (1 << 0),
     IF_TRANSPARENT  = (1 << 1),
     IF_PALETTED     = (1 << 2),
-    IF_SCRAP        = (1 << 3),
+    IF_UPSCALED     = (1 << 3),
+    IF_SCRAP        = (1 << 4),
+    IF_TURBULENT    = (1 << 5),
+    IF_REPEAT       = (1 << 6),
+    IF_NEAREST      = (1 << 7),
+    IF_OPAQUE       = (1 << 8),
 } imageflags_t;
 
 typedef enum {
@@ -209,8 +210,9 @@ void    R_LightPoint(vec3_t origin, vec3_t light);
 void    R_ClearColor(void);
 void    R_SetAlpha(float clpha);
 void    R_SetColor(uint32_t color);
-void    R_SetClipRect(int flags, const clipRect_t *clip);
-void    R_SetScale(float *scale);
+void    R_SetClipRect(const clipRect_t *clip);
+float   R_ClampScale(cvar_t *var);
+void    R_SetScale(float scale);
 void    R_DrawChar(int x, int y, int flags, int ch, qhandle_t font);
 int     R_DrawString(int x, int y, int flags, size_t maxChars,
                      const char *string, qhandle_t font);  // returns advanced x coord

@@ -59,9 +59,7 @@ entity_t    r_entities[MAX_ENTITIES];
 int         r_numparticles;
 particle_t  r_particles[MAX_PARTICLES];
 
-#if USE_LIGHTSTYLES
 lightstyle_t    r_lightstyles[MAX_LIGHTSTYLES];
-#endif
 
 /*
 ====================
@@ -123,16 +121,6 @@ void V_AddLight(vec3_t org, float intensity, float r, float g, float b)
         return;
     dl = &r_dlights[r_numdlights++];
     VectorCopy(org, dl->origin);
-#if USE_REF == REF_SOFT
-    // negative light in softwaref. only black allowed
-    if (r < 0 || g < 0 || b < 0) {
-        dl->intensity = -intensity;
-        dl->color[0] = 1;
-        dl->color[1] = 1;
-        dl->color[2] = 1;
-        return;
-    }
-#endif
     dl->intensity = intensity;
     dl->color[0] = r;
     dl->color[1] = g;
@@ -140,7 +128,6 @@ void V_AddLight(vec3_t org, float intensity, float r, float g, float b)
 }
 #endif
 
-#if USE_LIGHTSTYLES
 /*
 =====================
 V_AddLightStyle
@@ -161,7 +148,6 @@ void V_AddLightStyle(int style, vec4_t value)
     ls->rgb[2] = value[2];
     ls->white = value[3];
 }
-#endif
 
 #ifdef _DEBUG
 
@@ -239,12 +225,15 @@ static void V_TestLights(void)
     float       f, r;
     dlight_t    *dl;
 
-    if (cl_testlights->integer == 2) {
+    if (cl_testlights->integer != 1) {
         dl = &r_dlights[0];
         r_numdlights = 1;
 
         VectorMA(cl.refdef.vieworg, 256, cl.v_forward, dl->origin);
-        VectorSet(dl->color, 1, 1, 1);
+        if (cl_testlights->integer == -1)
+            VectorSet(dl->color, -1, -1, -1);
+        else
+            VectorSet(dl->color, 1, 1, 1);
         dl->intensity = 256;
         return;
     }
@@ -426,7 +415,7 @@ void V_RenderView(void)
 
         // adjust for non-4/3 screens
         if (cl_adjustfov->integer) {
-            cl.refdef.fov_y = V_CalcFov(cl.fov_x, 4, 3);
+            cl.refdef.fov_y = cl.fov_y;
             cl.refdef.fov_x = V_CalcFov(cl.refdef.fov_y, cl.refdef.height, cl.refdef.width);
         } else {
             cl.refdef.fov_x = cl.fov_x;
@@ -460,10 +449,7 @@ void V_RenderView(void)
         cl.refdef.num_dlights = r_numdlights;
         cl.refdef.dlights = r_dlights;
 #endif
-#if USE_LIGHTSTYLES
         cl.refdef.lightstyles = r_lightstyles;
-#endif
-
         cl.refdef.rdflags = cl.frame.ps.rdflags;
 
         // sort entities for better cache locality

@@ -763,9 +763,9 @@ static void read_fields(FILE *f, const save_field_t *fields, void *base)
 
 //=========================================================
 
-#define SAVE_MAGIC1  0x131415
-#define SAVE_MAGIC2  0x151413
-#define SAVE_VERSION 1
+#define SAVE_MAGIC1     (('1'<<24)|('V'<<16)|('S'<<8)|'S')  // "SSV1"
+#define SAVE_MAGIC2     (('1'<<24)|('V'<<16)|('A'<<8)|'S')  // "SAV1"
+#define SAVE_VERSION    2
 
 /*
 ============
@@ -827,7 +827,7 @@ void ReadGame(const char *filename)
     i = read_int(f);
     if (i != SAVE_VERSION) {
         fclose(f);
-        gi.error("Savegame from an older version.\n");
+        gi.error("Savegame from an older version");
     }
 
     read_fields(f, gamefields, &game);
@@ -835,11 +835,11 @@ void ReadGame(const char *filename)
     // should agree with server's version
     if (game.maxclients != (int)maxclients->value) {
         fclose(f);
-        gi.error("Savegame has bad maxclients.\n");
+        gi.error("Savegame has bad maxclients");
     }
     if (game.maxentities <= game.maxclients || game.maxentities > MAX_EDICTS) {
         fclose(f);
-        gi.error("Savegame has bad maxentities.\n");
+        gi.error("Savegame has bad maxentities");
     }
 
     g_edicts = gi.TagMalloc(game.maxentities * sizeof(g_edicts[0]), TAG_GAME);
@@ -937,7 +937,7 @@ void ReadLevel(const char *filename)
     i = read_int(f);
     if (i != SAVE_VERSION) {
         fclose(f);
-        gi.error("Savegame from an older version.\n");
+        gi.error("Savegame from an older version");
     }
 
     // load the level locals
@@ -984,6 +984,15 @@ void ReadLevel(const char *filename)
         if (ent->classname)
             if (strcmp(ent->classname, "target_crosslevel_target") == 0)
                 ent->nextthink = level.time + ent->delay;
+
+        if (ent->think == func_clock_think || ent->use == func_clock_use) {
+            char *msg = ent->message;
+            ent->message = gi.TagMalloc(CLOCK_MESSAGE_SIZE, TAG_LEVEL);
+            if (msg) {
+                Q_strlcpy(ent->message, msg, CLOCK_MESSAGE_SIZE);
+                gi.TagFree(msg);
+            }
+        }
     }
 }
 

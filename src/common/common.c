@@ -51,7 +51,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <setjmp.h>
 
-static jmp_buf  abortframe;     // an ERR_DROP occured, exit the entire frame
+static jmp_buf  com_abortframe;    // an ERR_DROP occured, exit the entire frame
+
+static void     (*com_abort_func)(void *);
+static void     *com_abort_arg;
 
 static qboolean com_errorEntered;
 static char     com_errorMsg[MAXERRORMSG]; // from Com_Printf/Com_Error
@@ -186,6 +189,7 @@ static void Com_Redirect(const char *msg, size_t total)
         }
         memcpy(rd_buffer + rd_length, msg, length);
         rd_length += length;
+        msg += length;
         total -= length;
     }
 }
@@ -408,11 +412,7 @@ void Com_LPrintf(print_type_t type, const char *fmt, ...)
     va_end(argptr);
 
     if (type == PRINT_ERROR && !com_errorEntered && len) {
-        size_t errlen = len;
-
-        if (errlen >= sizeof(com_errorMsg)) {
-            errlen = sizeof(com_errorMsg) - 1;
-        }
+        size_t errlen = min(len, sizeof(com_errorMsg) - 1);
 
         // save error msg
         memcpy(com_errorMsg, msg, errlen);
@@ -511,6 +511,12 @@ void Com_Error(error_type_t code, const char *fmt, ...)
     // abort any console redirects
     Com_AbortRedirect();
 
+    // call custom cleanup function if set
+    if (com_abort_func) {
+        com_abort_func(com_abort_arg);
+        com_abort_func = NULL;
+    }
+
     // reset Com_Printf recursion level
     com_printEntered = 0;
 
@@ -561,13 +567,19 @@ abort:
         FS_Flush(com_logFile);
     }
     com_errorEntered = qfalse;
-    longjmp(abortframe, -1);
+    longjmp(com_abortframe, -1);
+}
+
+void Com_AbortFunc(void (*func)(void *), void *arg)
+{
+    com_abort_func = func;
+    com_abort_arg = arg;
 }
 
 #ifdef _WIN32
 void Com_AbortFrame(void)
 {
-    longjmp(abortframe, -1);
+    longjmp(com_abortframe, -1);
 }
 #endif
 
@@ -651,25 +663,25 @@ static size_t Com_MapList_m(char *buffer, size_t size)
 {
     int i, numFiles;
     void **list;
-    char *s, *p;
     size_t len, total = 0;
 
-    list = FS_ListFiles("maps", ".bsp", 0, &numFiles);
-    for (i = 0; i < numFiles; i++) {
-        s = list[i];
-        p = COM_FileExtension(list[i]);
-        *p = 0;
-        len = strlen(s);
-        if (total + len + 1 < size) {
-            memcpy(buffer + total, s, len);
-            buffer[total + len] = ' ';
-            total += len + 1;
+    list = FS_ListFiles("maps", ".bsp", FS_SEARCH_STRIPEXT, &numFiles);
+    for (i = 0; i < numFiles && total < SIZE_MAX; i++) {
+        len = strlen(list[i]);
+        if (i)
+            total++;
+        total += len = min(len, SIZE_MAX - total);
+        if (total < size) {
+            if (i)
+                *buffer++ = ' ';
+            memcpy(buffer, list[i], len);
+            buffer += len;
         }
-        Z_Free(s);
     }
-    buffer[total] = 0;
+    if (size)
+        *buffer = 0;
 
-    Z_Free(list);
+    FS_FreeList(list);
     return total;
 }
 
@@ -865,7 +877,7 @@ Qcommon_Init
 */
 void Qcommon_Init(int argc, char **argv)
 {
-    if (setjmp(abortframe))
+    if (setjmp(com_abortframe))
         Sys_Error("Error during initialization: %s", com_errorMsg);
 
     com_argc = argc;
@@ -874,6 +886,8 @@ void Qcommon_Init(int argc, char **argv)
     Com_SetLastError(NULL);
 
     X86_SetFPCW();
+
+    srand(time(NULL));
 
     // prepare enough of the subsystems to handle
     // cvar and command buffer management
@@ -977,6 +991,7 @@ void Qcommon_Init(int argc, char **argv)
     Com_AddConfigFile(COM_DEFAULT_CFG, 0);
     Com_AddConfigFile(COM_CONFIG_CFG, FS_TYPE_REAL | FS_PATH_GAME);
     Com_AddConfigFile(COM_AUTOEXEC_CFG, FS_TYPE_REAL | FS_PATH_GAME);
+    Com_AddConfigFile(COM_POSTEXEC_CFG, FS_TYPE_REAL);
 
     Com_AddEarlyCommands(qtrue);
 
@@ -986,8 +1001,6 @@ void Qcommon_Init(int argc, char **argv)
 #if !USE_CLIENT
     Cmd_AddCommand("recycle", Com_Recycle_f);
 #endif
-
-    srand(Sys_Milliseconds());
 
     Netchan_Init();
     NET_Init();
@@ -1021,11 +1034,11 @@ void Qcommon_Init(int argc, char **argv)
         NET_Config(NET_SERVER);
     }
 
-    Com_AddConfigFile("postinit.cfg", FS_TYPE_REAL | FS_PATH_GAME);
+    Com_AddConfigFile(COM_POSTINIT_CFG, FS_TYPE_REAL);
 
     Com_Printf("====== " PRODUCT " initialized ======\n\n");
     Com_LPrintf(PRINT_NOTICE, APPLICATION " " VERSION ", " __DATE__ "\n");
-    Com_Printf("http://skuller.net/q2pro/\n\n");
+    Com_Printf("https://github.com/skullernet/q2pro\n\n");
 
     time(&com_startTime);
 
@@ -1047,7 +1060,7 @@ void Qcommon_Frame(void)
     static unsigned remaining;
     static float frac;
 
-    if (setjmp(abortframe)) {
+    if (setjmp(com_abortframe)) {
         return;            // an ERR_DROP was thrown
     }
 

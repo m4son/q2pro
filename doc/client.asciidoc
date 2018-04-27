@@ -68,7 +68,7 @@ cl_async::
         - 0 — run synchronous, like original Quake 2 does
         - 1 — run asynchronous
         - 2 — run asynchronous, limit rendering frame rate to monitor's vertical
-        retrace frequency (supported only by X11/GLX drivers)
+        retrace frequency (supported only when using SDL 1 with X11/GLX)
 
 .Rate limits depending on ‘cl_async’ value
 [options="header"]
@@ -96,7 +96,11 @@ cl_gibs::
 cl_gun::
     Controls rendering of the player's own gun model. When using R1Q2 or Q2PRO
     protocol, disabling this saves some bandwidth since the server stops
-    sending gun updates at all. Default value is 1 (enabled).
+    sending gun updates at all. Default value is 1.
+      - 0 — don't draw gun
+      - 1 — draw gun depending on player handedness
+      - 2 — force right handed gun
+      - 3 — force left handed gun
 
 cl_footsteps::
     Controls footstep sounds. When using Q2PRO protocol, disabling this saves
@@ -114,15 +118,29 @@ cl_updaterate::
 Network
 ~~~~~~~
 
+net_enable_ipv6::
+    Enables IPv6 support. Default value is 1 on systems that support IPv6 and 0
+    otherwise.
+      - 0 — disable IPv6, use IPv4 only
+      - 1 — enable IPv6, but prefer IPv4 over IPv6 when resolving host names
+      with multiple addresses
+      - 2 — enable IPv6, use normal address resolver priority configured by OS
+
 net_ip::
-    Specifies network interface address client should use for outgoing
-    connections.  Default value is empty, which means that default network
-    interface is used.
+    Specifies network interface address client should use for outgoing UDP
+    connections using IPv4.  Default value is empty, which means that default
+    network interface is used.
+
+net_ip6::
+    Specifies network interface address client should use for outgoing UDP
+    connections using IPv6.  Default value is empty, which means that default
+    network interface is used. Has no effect unless ‘net_enable_ipv6’ is set to
+    non-zero value.
 
 net_clientport::
-    Specifies UDP port number client should use for outgoing connections.
-    Default value is -1, which means that random port number is chosen at
-    socket creation time.
+    Specifies UDP port number client should use for outgoing connections (using
+    IPv4 or IPv6).  Default value is -1, which means that random port number is
+    chosen at socket creation time.
 
 net_maxmsglen::
     Specifies maximum server to client packet size client will request from
@@ -130,10 +148,10 @@ net_maxmsglen::
     It is nice to have this variable as close to your network link MTU as
     possible (accounting for headers). Thus for normal Ethernet MTU of 1500
     bytes 1462 can be specified (10 bytes quake header, 8 bytes UDP header, 20
-    bytes IP header). Higher values may cause IP fragmentation which is better
-    to avoid. Servers will cap this variable to their own maximum values.
-    Please don't change this variable unless you know exactly what you are
-    doing.
+    bytes IPv4 header). Higher values may cause IP fragmentation which is
+    better to avoid. Servers will cap this variable to their own maximum
+    values. Don't change this variable unless you know exactly what you
+    are doing.
 
 net_chantype::
     Specifies if enhanced Q2PRO network channel implementation is enabled when
@@ -178,10 +196,7 @@ cl_railtrail_type::
       - 1 — use alternative effect, draw rail core only
       - 2 — use alternative effect, draw rail core and spiral
 
-.Alternative rail trail
-NOTE: Alternative beam based rail trail effect is available in OpenGL mode
-only. In software mode original particle based effect is always used.
-Variables listed below apply to the alternative effect only.
+NOTE: Rail trail variables listed below apply to the alternative effect only.
 
 cl_railtrail_time::
     Time, in seconds, for the rail trail to be visible. Default value is 1.0.
@@ -251,6 +266,10 @@ s_auto_focus::
       - 2 — sound is activated when main window has input focus, and deactivated
       when it loses it
 
+s_swapstereo::
+    Swap left and right audio channels. Only effective when using DMA sound
+    engine. Default value is 0 (don't swap).
+
 al_driver::
     Specifies the name of OpenAL driver to use. Default value is ‘openal32’
     on Windows, and ‘libopenal.so.1’ on Linux.
@@ -260,17 +279,8 @@ al_device::
     your OpenAL implementation. Default value is empty, which means default
     sound output device is used.
 
-TIP: On Windows, there are two well-known OpenAL implementations available:
-http://connect.creativelabs.com/openal/[OpenAL32] from Creative, with
-support for harware acceleration on certain audio cards, and an open source
-software implementation named http://kcat.strangesoft.net/openal.html[OpenAL Soft].
-Both should work with Q2PRO, but to get the results most perceptually close to
-original Quake 2 sound, I recommend using OpenAL Soft. Creative's
-implementation seems to perform some default effects processing even when not
-requested, and that makes it sound somewhat differently. With OpenAL Soft in
-stereo configuration I can't really tell if I'm using OpenAL or default Quake 2
-sound engine. Of course you can install both implementations and switch between
-them by changing ‘al_driver’ variable between ‘openal32’ and ‘soft_oal’.
+TIP: Using http://kcat.strangesoft.net/openal.html[OpenAL Soft] implementation
+of OpenAL is recommended.
 
 
 Graphical Console
@@ -285,11 +295,12 @@ con_height::
 
 con_alpha::
     Opacity of in-game console background. 0 is fully transparent, 1 is opaque.
-    Takes effect in OpenGL mode only. Default value is 1.
+    Default value is 1.
 
 con_scale::
     Scaling factor of the console text. Takes effect in OpenGL mode only.
-    Default value is 1.
+    Default value is 0 (automatically scale depending on current display
+    resolution). Set to 1 to disable scaling.
 
 con_font::
     Font used for drawing console text. Default value is "conchars".
@@ -303,8 +314,8 @@ con_notifylines::
 
 con_history::
     Specifies how many lines to save into console history file before exiting
-    Q2PRO, to be reloaded on next startup. Maximum number of history lines is
-    \128. Default value is 0.
+    Q2PRO, to be reloaded on next startup. Maximum number of history lines is 128.
+    Default value is 0.
 
 con_scroll::
     Controls automatic scrolling of console text when some event occurs. This
@@ -361,11 +372,12 @@ scr_showpause::
 
 scr_scale::
     Scaling factor of the HUD elements. Takes effect in OpenGL mode only.
-    Default value is 1.
+    Default value is 0 (automatically scale depending on current display
+    resolution). Set to 1 to disable scaling.
 
 scr_alpha::
-    Opacity of the HUD elements. 0 is fully transparent, 1 is opaque. Takes
-    effect in OpenGL mode only. Default value is 1.
+    Opacity of the HUD elements. 0 is fully transparent, 1 is opaque. Default
+    value is 1.
 
 scr_font::
     Font used for drawing HUD text. Default value is "conchars".
@@ -394,6 +406,30 @@ scr_lag_min::
 scr_lag_max::
     Specifies ping graph scale by defining the maximum value that can be
     displayed. Default value is 200.
+
+scr_chathud::
+    Toggles drawing of the last chat lines on the screen. Default value is 0.
+      - 0 — do not draw chat lines
+      - 1 — draw chat lines in normal color
+      - 2 — draw chat lines in alternative color
+
+scr_chathud_lines::
+    Specifies number of the last chat lines drawn on the screen. Default value
+    is 4. Maximum value is 32.
+
+scr_chathud_time::
+    Specifies visibility time of each chat line, counted in seconds. Default
+    value is 0 (lines never fade out).
+
+scr_chathud_x::
+    Absolute value of this cvar specifies horizontal placement of the chat HUD,
+    counted in pixels from the screen edge. Negative values align graph to the right
+    edge of the screen instead of the left edge. Default value is 8.
+
+scr_chathud_y::
+    Absolute value of this cvar specifies vertical placement of the chat HUD,
+    counted in pixels from the screen edge. Negative values align graph to the bottom
+    edge of the screen intead of the top edge. Default value is -64.
 
 ch_health::
     Enables dynamic crosshair coloring based on the health statistic seen in
@@ -432,7 +468,7 @@ vid_modelist::
     Space separated list of fullscreen video modes. Both _freq_ and _bpp_
     parameters are optional. Full syntax is: 'WxH[@freq][:bpp] [...]'. Default
     value is "640x480 800x600 1024x768". On Linux, _freq_ parameter is currently
-    ignored.
+    ignored. Special keyword ‘desktop’ means to use default desktop video mode.
 
 vid_fullscreen::
     If set to non zero _value_, run in the specified fullscreen mode. This way,
@@ -520,15 +556,21 @@ gl_bilerp_pics::
       - 1 — enabled for large pictures that don't fit into the scrap
       - 2 — enabled for all pictures, including the scrap texture itself
 
-gl_maxmip::
-    When set to a positive integer N, limits maximum texture size to 2^N^.
-    Larger textures will be downsampled to that size. Default value is 0
-    (unlimited).
+gl_upscale_pcx::
+    Enables upscaling of PCX images using HQ2x and HQ4x filters. This improves
+    rendering quality when screen scaling is used. Default value is 0.
+      - 0 — don't upscale
+      - 1 — upscale 2x (takes 5x more memory)
+      - 2 — upscale 4x (takes 21x more memory)
+
+gl_texture_non_power_of_two::
+    Enables use of non power-of-two sized textures without resampling on OpenGL
+    3.0 and higher compliant hardware. Default value is 1.
 
 gl_downsample_skins::
     Specifies if skins are downsampled just like world textures are. When
-    disabled, ‘gl_round_down’, ‘gl_picmip’ and ‘gl_maxmip’ cvars will have no
-    effect on skins.  Default value is 1 (downsampling enabled).
+    disabled, ‘gl_round_down’, ‘gl_picmip’ cvars have no effect on skins.
+    Default value is 1 (downsampling enabled).
 
 gl_drawsky::
     Enable skybox texturing. 0 means to draw sky box in solid black color.
@@ -608,8 +650,9 @@ similar effect, set the legacy ‘gl_modulate’ variable to 1, and configure
 
 gl_doublelight_entities::
     Specifies if combined modulation factor is applied to entity lighting one
-    more time just before final lighting value is calculated, to simulate a bug
-    (?) in the original Quake 2 renderer. Default value is 1 (apply twice).
+    more time just before final lighting value is calculated, to simulate a
+    well-known bug in the original Quake 2 renderer. Default value is 1 (apply
+    twice).
 
 .Entity lighting
 ****************
@@ -644,13 +687,14 @@ gl_fragment_program::
 gl_vertex_buffer_object::
     Enables ‘GL_ARB_vertex_buffer_object’ extension, if supported by your
     OpenGL implementation. This extension allows world surfaces to be stored in
-    high-performance video memory, which usually speeds up rendering. Default
-    value is 1 (enabled).
+    static memory area, which speeds up rendering. Default value is 1
+    (enabled).
 
 gl_video_sync::
-    On X11/GLX, enables ‘GLX_SGI_video_sync’ extension. This extension allows
-    synchronizing rendering framerate to monitor vertical retrace frequency.
-    Default value is 1 (enabled). See also ‘cl_async’ variable.
+    Enables ‘GLX_SGI_video_sync’ extension when using SDL 1 with X11/GLX. This
+    extension allows synchronizing rendering framerate to monitor vertical
+    retrace frequency. Default value is 1 (enabled). See also ‘cl_async’
+    variable.
 
 gl_colorbits::
     Specifies desired size of color buffer, in bits, requested from OpenGL
@@ -673,6 +717,11 @@ gl_multisamples::
     anti-aliasing, if supported by OpenGL implementation. Values 0 and 1 are
     equivalent and disable MSAA. Values from 2 to 32 enable MSAA. Default
     value is 0.
+
+gl_texturebits::
+    Specifies number of bits per texel used for internal texture storage
+    (should be typically 0, 8, 16 or 32). Default value is 0 (choose the best
+    internal format automatically).
 
 gl_screenshot_format::
     Specifies image format ‘screenshot’ command uses. Possible values are
@@ -803,17 +852,20 @@ in_device::
     should be one of ‘/dev/input/eventX’ files (reading permissions are
     required).  Default value is empty and needs to be filled by user.
 
-in_smart_grab::
-    Enables ‘smart’ mouse grabbing policy in windowed mode: mouse will be
-    automatically released when mouse input is not needed (playing a demo, or
-    spectating a player). Default value is 0 (grab mouse unless console or menu
-    is up).
+in_grab::
+    Specifies mouse grabbing policy in windowed mode. Normally, mouse is always
+    grabbed in-game and released when console or menu is up. In addition to
+    that, smart policy mode automatically releases the mouse when its input is
+    not needed (playing a demo, or spectating a player). Default value is 1.
+      - 0 — don't grab mouse
+      - 1 — normal grabbing policy
+      - 2 — smart grabbing policy
 
 m_autosens::
-    When enabled, mouse sensitivity is scaled proportional to current player field
-    of view. When FOV is exactly 90, no scaling is applied. Higher FOV values will
-    scale sensitivity higher, lower FOV values will scale sensitivity lower.
-    Default value is 0 (scaling disabled).
+    Enables automatic scaling of mouse sensitivity proportional to the current
+    player field of view. Values between 90 and 179 specify the default FOV
+    value to scale sensitivity from. Zero disables automatic scaling. Any other
+    value assumes default FOV of 90 degrees. Default value is 0.
 
 m_accel::
     Specifies mouse acceleration factor. Default value is 0 (acceleration
@@ -853,7 +905,7 @@ cl_chat_filter::
     messages, to prevent common exploits like hiding player names. Default
     value is 0 (don't filter).
 
-cl_noskins 0::
+cl_noskins::
     Restricts which models and skins players can use. Default value is 0.
       - 0 — no restrictions, if skins exists, it will be loaded
       - 1 — do not allow any skins except of ‘male/grunt’
@@ -888,9 +940,13 @@ cl_demomsglen::
     value is 1390.  See ‘record’ command description for more information on
     demo packet sizes.
 
+cl_demowait::
+    Specifies if demo playback is automatically paused at the last frame in
+    demo file. Default value is 0 (finish playback).
+
 cl_autopause::
-    Specifies if single player game or demo playback is automaticlly paused once
-    client console or menu is opened. Default value is 1 (pause game).
+    Specifies if single player game or demo playback is automatically paused
+    once client console or menu is opened. Default value is 1 (pause game).
 
 ui_open::
     Specifies if menu is automatically opened on startup, instead of full
@@ -901,7 +957,9 @@ ui_background::
     just fills the screen with solid black color.
 
 ui_scale::
-    Scaling factor of the UI widgets. Takes effect in OpenGL mode only. Default value is 1.
+    Scaling factor of the UI widgets. Takes effect in OpenGL mode only. Default
+    value is 0 (automatically scale depending on current display resolution).
+    Set to 1 to disable scaling.
 
 ui_sortdemos::
     Specifies default sorting order of entries in demo browser. Default value
@@ -928,6 +986,11 @@ ui_sortservers::
         - 4 — sort by players
         - 5 — sort by RTT
 
+ui_colorservers::
+    Enables highlighting of entries in server browser with different colors.
+    Currently, this option grays out password protected and anticheat enforced
+    servers. Default value is 0 (disabled).
+
 ui_pingrate::
     Specifies the server pinging rate used by server browser, in packets per
     second. Default value is 0, which estimates the default pinging rate based
@@ -948,7 +1011,7 @@ Macros behave like automated console variables. When macro expansion is
 performed, macros are searched first, then console variables.
 
 .Macro expansion syntax
-=======================
+============
 Each of the following examples are valid and produce the same output:
 ------------
 /echo $loc_here
@@ -956,7 +1019,7 @@ Each of the following examples are valid and produce the same output:
 /echo ${loc_here}
 /echo ${$loc_here}
 ------------
-======================
+============
 
 [horizontal]
 .List of client macros
@@ -1087,6 +1150,9 @@ dec <cvar> [value]::
 reset <cvar>::
     Reset the specified _cvar_ to it's default value.
 
+resetall::
+    Resets all cvars to their default values.
+
 set <cvar> <value> [u|s|...]::
     If 2 arguments are given, sets the specified _cvar_ to _value_.  If 3
     arguments are given, and the last argument is ‘u’ or ‘s’, sets _cvar_ to
@@ -1194,12 +1260,12 @@ undraw [all] | <name>::
     screen. Specify _all_ to remove all objects.
 
 .Drawing FPS and a clock
-========================
+===================
 -------------------
 /draw cl_fps -1 -1  // bottom right
 /draw com_time 0 -1 // bottom left
 -------------------
-=======================
+===================
 
 
 Screenshots
@@ -1227,6 +1293,27 @@ screenshottga [filename]::
     Takes the screenshot in TGA format. If _filename_ argument is given, saves
     the screenshot into ‘screenshots/_filename_.tga’. Otherwise, file name is
     picked up automatically.
+
+
+Locations
+~~~~~~~~~
+
+loc_add <name ...>::
+    Adds new location with the specified name at current player position.
+
+loc_delete::
+    Deletes location closest to player position.
+
+loc_update <name ...>::
+    Changes name of location closest to player position.
+
+loc_write::
+    Saves current location list into ‘locs/<mapname>.loc’ file.
+
+NOTE: Edit locations on a local server and don't forget to execute ‘loc_write’
+command once you are finished. Otherwise all changes to location list will be
+lost on map change or disconnect.
+
 
 Miscellaneous
 ~~~~~~~~~~~~~
@@ -1324,10 +1411,10 @@ it used to be you know where to look. The following list may be incomplete.
 
 - Joysticks are not supported.
 
-- Single player savegames are partially supported: only ‘savegame’ and
-  ‘loadgame’ console commands are available yet (no menu and autosave support),
-  and only the ‘baseq2’ game library included in Q2PRO distribution has been
-  converted to use the new improved savegame format.
+- Single player savegame format has been rewritten from scratch for better
+  robustness and portability. Only the ‘baseq2’ game library included in Q2PRO
+  distribution has been converted to use the new improved savegame format. Q2PRO
+  will refuse to load and save games in old format for security reasons.
 
 - CD music is not supported.
 

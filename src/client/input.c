@@ -60,20 +60,9 @@ INPUT SUBSYSTEM
 ===============================================================================
 */
 
-typedef enum {
-    HIDE_NOT,
-    HIDE_HIDE,
-    HIDE_SHOW,
-    HIDE_SHOW_NC
-} hide_t;
-
 typedef struct {
-    qboolean    initialized;
-    inputAPI_t  api;
     qboolean    modified;
-    hide_t      hide_cursor;
-    unsigned    last_motion;
-    unsigned    hide_delay;
+    inputAPI_t  api;
     int         old_dx;
     int         old_dy;
 } in_state_t;
@@ -84,43 +73,37 @@ static cvar_t    *in_enable;
 #if USE_DINPUT
 static cvar_t    *in_direct;
 #endif
-static cvar_t    *in_smart_grab;
-static cvar_t    *in_hide_delay;
+static cvar_t    *in_grab;
 
-static inline grab_t get_grab_mode(void)
+static qboolean IN_GetCurrentGrab(void)
 {
-    // never grab if main window doesn't have focus
     if (cls.active != ACT_ACTIVATED)
-        return IN_FREE;
+        return qfalse;  // main window doesn't have focus
 
-    // always grab in full screen
     if (r_config.flags & QVF_FULLSCREEN)
-        return IN_GRAB;
+        return qtrue;   // full screen
 
-    // show cursor if menu is up
-    if (cls.key_dest & KEY_MENU)
-        return IN_SHOW;
+    if (cls.key_dest & (KEY_MENU | KEY_CONSOLE))
+        return qfalse;  // menu or console is up
 
-    // hide cursor, but don't grab if console is up
-    if (cls.key_dest & KEY_CONSOLE)
-        return IN_HIDE;
     if (sv_paused->integer)
-        return IN_HIDE;
-    if (cls.state < ca_active)
-        return IN_HIDE;
+        return qfalse;  // game paused
 
-    // don't grab if mouse input is not needed
-    if (in_smart_grab->integer) {
-        // playing a demo (and not using freelook)
+    if (cls.state != ca_active)
+        return qfalse;  // not connected
+
+    if (in_grab->integer >= 2) {
         if (cls.demo.playback && !Key_IsDown(K_SHIFT))
-            return IN_HIDE;
-        // spectator mode
+            return qfalse;  // playing a demo (and not using freelook)
+
         if (cl.frame.ps.pmove.pm_type == PM_FREEZE)
-            return IN_HIDE;
+            return qfalse;  // spectator mode
     }
 
-    // regular playing mode, grab
-    return IN_GRAB;
+    if (in_grab->integer >= 1)
+        return qtrue;   // regular playing mode
+
+    return qfalse;
 }
 
 /*
@@ -130,29 +113,9 @@ IN_Activate
 */
 void IN_Activate(void)
 {
-    grab_t grab;
-
-    if (!input.initialized) {
-        return;
+    if (input.api.Grab) {
+        input.api.Grab(IN_GetCurrentGrab());
     }
-
-    grab = get_grab_mode();
-
-    // set up cursor hiding policy
-    if (grab == IN_HIDE && in_hide_delay->value > 0.1f) {
-        input.hide_cursor = HIDE_SHOW;
-        input.last_motion = com_localTime;
-        input.hide_delay = in_hide_delay->value * 1000;
-        grab = IN_SHOW;
-    } else {
-        input.hide_cursor = HIDE_NOT;
-        input.last_motion = com_localTime;
-        input.hide_delay = 0;
-        if (grab == IN_HIDE)
-            grab = IN_SHOW;
-    }
-
-    input.api.Grab(grab);
 }
 
 /*
@@ -175,19 +138,11 @@ void IN_Frame(void)
 {
     if (input.modified) {
         IN_Restart_f();
-        input.modified = qfalse;
         return;
     }
 
-    if (input.initialized) {
-        if (input.api.GetEvents) {
-            input.api.GetEvents();
-        }
-        if (input.hide_cursor == HIDE_SHOW &&
-            com_localTime - input.last_motion > input.hide_delay) {
-            input.api.Grab(IN_HIDE);
-            input.hide_cursor = HIDE_HIDE;
-        }
+    if (input.api.GetEvents) {
+        input.api.GetEvents();
     }
 
 #if USE_LIRC
@@ -197,39 +152,12 @@ void IN_Frame(void)
 
 /*
 ================
-IN_MouseEvent
-================
-*/
-void IN_MouseEvent(int x, int y)
-{
-    input.last_motion = com_localTime;
-    if (input.hide_cursor == HIDE_HIDE) {
-        input.api.Grab(IN_SHOW);
-        input.hide_cursor = HIDE_SHOW;
-    }
-
-    if (x < 0 && y < 0) {
-        // cursor is over non-client area
-        if (input.hide_cursor == HIDE_SHOW)
-            input.hide_cursor = HIDE_SHOW_NC;
-        return;
-    }
-
-    // cursor is over client area
-    if (input.hide_cursor == HIDE_SHOW_NC)
-        input.hide_cursor = HIDE_SHOW;
-
-    UI_MouseEvent(x, y);
-}
-
-/*
-================
 IN_WarpMouse
 ================
 */
 void IN_WarpMouse(int x, int y)
 {
-    if (input.initialized && input.api.Warp) {
+    if (input.api.Warp) {
         input.api.Warp(x, y);
     }
 }
@@ -241,16 +169,24 @@ IN_Shutdown
 */
 void IN_Shutdown(void)
 {
-    if (input.initialized) {
 #if USE_DINPUT
+    if (in_direct) {
         in_direct->changed = NULL;
-#endif
-        input.api.Shutdown();
-        memset(&input, 0, sizeof(input));
     }
+#endif
+    if (in_grab) {
+        in_grab->changed = NULL;
+    }
+
+    if (input.api.Shutdown) {
+        input.api.Shutdown();
+    }
+
 #if USE_LIRC
     Lirc_Shutdown();
 #endif
+
+    memset(&input, 0, sizeof(input));
 }
 
 static void in_changed_hard(cvar_t *self)
@@ -307,13 +243,8 @@ void IN_Init(void)
     in_direct->changed = in_changed_hard;
 #endif
 
-    in_smart_grab = Cvar_Get("in_smart_grab", "0", 0);
-    in_smart_grab->changed = in_changed_soft;
-
-    in_hide_delay = Cvar_Get("in_hide_delay", "0", 0);
-    in_hide_delay->changed = in_changed_soft;
-
-    input.initialized = qtrue;
+    in_grab = Cvar_Get("in_grab", "1", 0);
+    in_grab->changed = in_changed_soft;
 
     IN_Activate();
 }
@@ -476,7 +407,8 @@ static void IN_StrafeUp(void) { KeyUp(&in_strafe); }
 static void IN_AttackDown(void)
 {
     KeyDown(&in_attack);
-    if (cl_instantpacket->integer) {
+
+    if (cl_instantpacket->integer && cls.state == ca_active && cls.netchan) {
         cl.sendPacketNow = qtrue;
     }
 }
@@ -489,7 +421,8 @@ static void IN_AttackUp(void)
 static void IN_UseDown(void)
 {
     KeyDown(&in_use);
-    if (cl_instantpacket->integer) {
+
+    if (cl_instantpacket->integer && cls.state == ca_active && cls.netchan) {
         cl.sendPacketNow = qtrue;
     }
 }
@@ -541,8 +474,9 @@ static float CL_KeyState(kbutton_t *key)
         }
     }
 
+    // special case for instant packet
     if (!cl.cmd.msec) {
-        return 0;
+        return (float)(key->state & 1);
     }
 
     val = (float)msec / cl.cmd.msec;
@@ -551,6 +485,9 @@ static float CL_KeyState(kbutton_t *key)
 }
 
 //==========================================================================
+
+static float autosens_x;
+static float autosens_y;
 
 /*
 ================
@@ -563,7 +500,7 @@ static void CL_MouseMove(void)
     float mx, my;
     float speed;
 
-    if (!input.initialized) {
+    if (!input.api.GetMotion) {
         return;
     }
     if (cls.key_dest & (KEY_MENU | KEY_CONSOLE)) {
@@ -596,9 +533,9 @@ static void CL_MouseMove(void)
     mx *= speed;
     my *= speed;
 
-    if (m_autosens->integer && cl.fov_x >= 1) {
-        mx *= cl.fov_x / 90.0f;
-        my *= V_CalcFov(cl.fov_x, 4, 3) / 73.739795291688f;
+    if (m_autosens->integer) {
+        mx *= cl.fov_x * autosens_x;
+        my *= cl.fov_y * autosens_y;
     }
 
 // add mouse X/Y movement
@@ -746,6 +683,18 @@ void CL_UpdateCmd(int msec)
     cl.cmd.angles[2] = ANGLE2SHORT(cl.viewangles[2]);
 }
 
+static void m_autosens_changed(cvar_t *self)
+{
+    float fov;
+
+    if (self->value > 90.0f && self->value <= 179.0f)
+        fov = self->value;
+    else
+        fov = 90.0f;
+
+    autosens_x = 1.0f / fov;
+    autosens_y = 1.0f / V_CalcFov(fov, 4, 3);
+}
 
 /*
 ============
@@ -822,6 +771,8 @@ void CL_RegisterInput(void)
     m_filter = Cvar_Get("m_filter", "0", 0);
     m_accel = Cvar_Get("m_accel", "0", 0);
     m_autosens = Cvar_Get("m_autosens", "0", 0);
+    m_autosens->changed = m_autosens_changed;
+    m_autosens_changed(m_autosens);
 }
 
 /*
@@ -844,7 +795,7 @@ void CL_FinalizeCmd(void)
         cl_cmdbuf.waitCount--;
     }
 
-    if (cls.state < ca_active) {
+    if (cls.state != ca_active) {
         return; // not talking to a server
     }
 
@@ -1161,7 +1112,7 @@ static void CL_SendKeepAlive(void)
     cl.lastTransmitCmdNumber = cl.cmdNumber;
     cl.lastTransmitCmdNumberReal = cl.cmdNumber;
 
-    cursize = cls.netchan->Transmit(cls.netchan, 0, NULL, 1);
+    cursize = cls.netchan->Transmit(cls.netchan, 0, "", 1);
 #ifdef _DEBUG
     if (cl_showpackets->integer) {
         Com_Printf("%"PRIz" ", cursize);
@@ -1220,7 +1171,7 @@ void CL_SendCmd(void)
         return;
     }
 
-    if (cls.state < ca_active || sv_paused->integer) {
+    if (cls.state != ca_active || sv_paused->integer) {
         // send a userinfo update if needed
         CL_SendUserinfo();
 
@@ -1228,6 +1179,8 @@ void CL_SendCmd(void)
         if (cls.netchan->ShouldUpdate(cls.netchan)) {
             CL_SendKeepAlive();
         }
+
+        cl.sendPacketNow = qfalse;
         return;
     }
 

@@ -21,13 +21,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define AFFINE_SPANLET_SIZE_BITS 4
 
 typedef struct {
-    byte     *pbase, *pdest;
-    short    *pz;
-    fixed16_t s, t;
-    fixed16_t sstep, tstep;
-    int       izi, izistep, izistep_times_2;
-    int       spancount;
-    unsigned  u, v;
+    byte        *pbase, *pdest;
+    short       *pz;
+    fixed16_t   s, t;
+    fixed16_t   sstep, tstep;
+    int         izi, izistep;
+    int         spancount;
+    unsigned    u, v;
 } spanletvars_t;
 
 static spanletvars_t s_spanletvars;
@@ -80,11 +80,11 @@ static void R_DrawSpanletTurbulentBlended(void)
     byte    *ptex;
 
     do {
-        sturb = ((s_spanletvars.s + r_turb_turb[(s_spanletvars.t >> 16) & (CYCLE - 1)]) >> 16) & 63;
-        tturb = ((s_spanletvars.t + r_turb_turb[(s_spanletvars.s >> 16) & (CYCLE - 1)]) >> 16) & 63;
+        sturb = ((s_spanletvars.s + r_turb_turb[(s_spanletvars.t >> 16) & (CYCLE - 1)]) >> 16) & TURB_MASK;
+        tturb = ((s_spanletvars.t + r_turb_turb[(s_spanletvars.s >> 16) & (CYCLE - 1)]) >> 16) & TURB_MASK;
 
         if (*s_spanletvars.pz <= (s_spanletvars.izi >> 16)) {
-            ptex = s_spanletvars.pbase + (sturb) * TEX_BYTES + (tturb) * 64 * TEX_BYTES;
+            ptex = s_spanletvars.pbase + (sturb) * TEX_BYTES + (tturb) * TURB_SIZE * TEX_BYTES;
             s_spanletvars.pdest[0] = (s_spanletvars.pdest[0] * r_polydesc.one_minus_alpha + ptex[2] * r_polydesc.alpha) >> 8;
             s_spanletvars.pdest[1] = (s_spanletvars.pdest[1] * r_polydesc.one_minus_alpha + ptex[1] * r_polydesc.alpha) >> 8;
             s_spanletvars.pdest[2] = (s_spanletvars.pdest[2] * r_polydesc.one_minus_alpha + ptex[0] * r_polydesc.alpha) >> 8;
@@ -239,7 +239,6 @@ static int R_ClipPolyFace(int nump, clipplane_t *pclipplane)
 /*
 ** R_PolygonDrawSpans
 */
-// PGM - iswater was qboolean. changed to allow passing more flags
 static void R_PolygonDrawSpans(espan_t *pspan, int iswater)
 {
     int         count;
@@ -249,12 +248,10 @@ static void R_PolygonDrawSpans(espan_t *pspan, int iswater)
 
     s_spanletvars.pbase = cacheblock;
 
-//PGM
     if (iswater & SURF_WARP)
         r_turb_turb = sintable + ((int)(r_newrefdef.time * SPEED) & (CYCLE - 1));
     else if (iswater & SURF_FLOWING)
         r_turb_turb = blanktable;
-//PGM
 
     sdivzspanletstepu = d_sdivzstepu * AFFINE_SPANLET_SIZE;
     tdivzspanletstepu = d_tdivzstepu * AFFINE_SPANLET_SIZE;
@@ -262,13 +259,12 @@ static void R_PolygonDrawSpans(espan_t *pspan, int iswater)
 
 // we count on FP exceptions being turned off to avoid range problems
     s_spanletvars.izistep = (int)(d_zistepu * 0x8000 * 0x10000);
-    s_spanletvars.izistep_times_2 = s_spanletvars.izistep * 2;
 
     s_spanletvars.pz = 0;
 
     do {
-        s_spanletvars.pdest   = (byte *)d_viewbuffer + d_scantable[pspan->v] + pspan->u * VID_BYTES;
-        s_spanletvars.pz      = d_pzbuffer + (d_zwidth * pspan->v) + pspan->u;
+        s_spanletvars.pdest   = d_spantable[pspan->v] + pspan->u * VID_BYTES;
+        s_spanletvars.pz      = d_zspantable[pspan->v] + pspan->u;
         s_spanletvars.u       = pspan->u;
         s_spanletvars.v       = pspan->v;
 
@@ -329,8 +325,8 @@ static void R_PolygonDrawSpans(espan_t *pspan, int iswater)
                         snext = bbextents;
                     else if (snext < AFFINE_SPANLET_SIZE)
                         snext = AFFINE_SPANLET_SIZE;    // prevent round-off error on <0 steps from
-                    //  from causing overstepping & running off the
-                    //  edge of the texture
+                                                        // from causing overstepping & running off the
+                                                        // edge of the texture
 
                     if (tnext > bbextentt)
                         tnext = bbextentt;
@@ -358,8 +354,8 @@ static void R_PolygonDrawSpans(espan_t *pspan, int iswater)
                         snext = bbextents;
                     else if (snext < AFFINE_SPANLET_SIZE)
                         snext = AFFINE_SPANLET_SIZE;    // prevent round-off error on <0 steps from
-                    //  from causing overstepping & running off the
-                    //  edge of the texture
+                                                        // from causing overstepping & running off the
+                                                        // edge of the texture
 
                     if (tnext > bbextentt)
                         tnext = bbextentt;
@@ -534,7 +530,6 @@ static void R_PolygonScanRightEdge(void)
 /*
 ** R_ClipAndDrawPoly
 */
-// PGM - isturbulent was qboolean. changed to int to allow passing more flags
 static void R_ClipAndDrawPoly(float alpha, int isturbulent, int textured)
 {
     emitpoint_t outverts[MAXWORKINGVERTS + 3], *pout;
@@ -588,11 +583,11 @@ static void R_ClipAndDrawPoly(float alpha, int isturbulent, int textured)
         pout->s = pv[3];
         pout->t = pv[4];
 
-        scale = xscale * pout->zi;
-        pout->u = (xcenter + scale * transformed[0]);
+        scale = r_refdef.xscale * pout->zi;
+        pout->u = (r_refdef.xcenter + scale * transformed[0]);
 
-        scale = yscale * pout->zi;
-        pout->v = (ycenter - scale * transformed[1]);
+        scale = r_refdef.yscale * pout->zi;
+        pout->v = (r_refdef.ycenter - scale * transformed[1]);
 
         pv += sizeof(vec5_t) / sizeof(vec_t);
     }
@@ -612,13 +607,16 @@ static void R_BuildPolygonFromSurface(mface_t *fa)
     int         i, lnumverts;
     msurfedge_t *surfedge;
     float       *vec;
-    vec5_t     *pverts;
+    vec5_t      *pverts;
     float       tmins[2] = { 0, 0 };
 
     r_polydesc.nump = 0;
 
     // reconstruct the polygon
     lnumverts = fa->numsurfedges;
+
+    if (lnumverts > MAXWORKINGVERTS)
+        Com_Error(ERR_DROP, "R_BuildPolygonFromSurface: too many points: %d", lnumverts);
 
     pverts = r_clip_verts[0];
 
@@ -637,14 +635,11 @@ static void R_BuildPolygonFromSurface(mface_t *fa)
         VectorInverse(r_polydesc.vpn);
     }
 
-// PGM 09/16/98
     if (fa->texinfo->c.flags & (SURF_WARP | SURF_FLOWING)) {
         r_polydesc.pixels       = fa->texinfo->image->pixels[0];
-        r_polydesc.pixel_width  = fa->texinfo->image->width;
-        r_polydesc.pixel_height = fa->texinfo->image->height;
-    }
-// PGM 09/16/98
-    else {
+        r_polydesc.pixel_width  = fa->texinfo->image->upload_width;
+        r_polydesc.pixel_height = fa->texinfo->image->upload_height;
+    } else {
         surfcache_t *scache;
 
         scache = D_CacheSurface(fa, 0);
@@ -684,17 +679,17 @@ static void R_PolygonCalculateGradients(void)
 
     distinv = 1.0 / (-(DotProduct(r_polydesc.viewer_position, r_polydesc.vpn)) + r_polydesc.dist);
 
-    d_sdivzstepu  =  p_saxis[0] * xscaleinv;
-    d_sdivzstepv  = -p_saxis[1] * yscaleinv;
-    d_sdivzorigin =  p_saxis[2] - xcenter * d_sdivzstepu - ycenter * d_sdivzstepv;
+    d_sdivzstepu  =  p_saxis[0] * r_refdef.xscaleinv;
+    d_sdivzstepv  = -p_saxis[1] * r_refdef.yscaleinv;
+    d_sdivzorigin =  p_saxis[2] - r_refdef.xcenter * d_sdivzstepu - r_refdef.ycenter * d_sdivzstepv;
 
-    d_tdivzstepu  =  p_taxis[0] * xscaleinv;
-    d_tdivzstepv  = -p_taxis[1] * yscaleinv;
-    d_tdivzorigin =  p_taxis[2] - xcenter * d_tdivzstepu - ycenter * d_tdivzstepv;
+    d_tdivzstepu  =  p_taxis[0] * r_refdef.xscaleinv;
+    d_tdivzstepv  = -p_taxis[1] * r_refdef.yscaleinv;
+    d_tdivzorigin =  p_taxis[2] - r_refdef.xcenter * d_tdivzstepu - r_refdef.ycenter * d_tdivzstepv;
 
-    d_zistepu =   p_normal[0] * xscaleinv * distinv;
-    d_zistepv =  -p_normal[1] * yscaleinv * distinv;
-    d_ziorigin =  p_normal[2] * distinv - xcenter * d_zistepu - ycenter * d_zistepv;
+    d_zistepu =   p_normal[0] * r_refdef.xscaleinv * distinv;
+    d_zistepv =  -p_normal[1] * r_refdef.yscaleinv * distinv;
+    d_ziorigin =  p_normal[2] * distinv - r_refdef.xcenter * d_zistepu - r_refdef.ycenter * d_zistepv;
 
     sadjust = (fixed16_t)((DotProduct(r_polydesc.viewer_position, r_polydesc.vright) + r_polydesc.s_offset) * 0x10000);
     tadjust = (fixed16_t)((DotProduct(r_polydesc.viewer_position, r_polydesc.vup) + r_polydesc.t_offset) * 0x10000);
@@ -712,7 +707,6 @@ static void R_PolygonCalculateGradients(void)
 **
 ** This should NOT be called externally since it doesn't do clipping!
 */
-// PGM - iswater was qboolean. changed to support passing more flags
 static void R_DrawPoly(int iswater)
 {
     int         i, nump;
@@ -780,20 +774,10 @@ void R_DrawAlphaSurfaces(void)
     while (s) {
         R_BuildPolygonFromSurface(s);
 
-//=======
-//PGM
-//      if (s->texinfo->flags & SURF_TRANS66)
-//          R_ClipAndDrawPoly(0.60f, (s->texinfo->flags & SURF_WARP) != 0, qtrue);
-//      else
-//          R_ClipAndDrawPoly(0.30f, (s->texinfo->flags & SURF_WARP) != 0, qtrue);
-
-        // PGM - pass down all the texinfo flags, not just SURF_WARP.
         if (s->texinfo->c.flags & SURF_TRANS66)
-            R_ClipAndDrawPoly(0.60f, (s->texinfo->c.flags & (SURF_WARP | SURF_FLOWING)), qtrue);
+            R_ClipAndDrawPoly(0.66f, (s->texinfo->c.flags & (SURF_WARP | SURF_FLOWING)), qtrue);
         else
-            R_ClipAndDrawPoly(0.30f, (s->texinfo->c.flags & (SURF_WARP | SURF_FLOWING)), qtrue);
-//PGM
-//=======
+            R_ClipAndDrawPoly(0.33f, (s->texinfo->c.flags & (SURF_WARP | SURF_FLOWING)), qtrue);
 
         s = s->next;
     }
@@ -853,14 +837,14 @@ void R_DrawSprite(void)
     vec5_t      *pverts;
     vec3_t      left, up, right, down;
     mspriteframe_t  *frame;
-    int textured;
+    int             textured;
 
     frame = &currentmodel->spriteframes[
                 currententity->frame % currentmodel->numframes];
 
     r_polydesc.pixels       = frame->image->pixels[0];
-    r_polydesc.pixel_width  = frame->width;
-    r_polydesc.pixel_height = frame->height;
+    r_polydesc.pixel_width  = frame->image->upload_width;
+    r_polydesc.pixel_height = frame->image->upload_height;
     r_polydesc.dist         = 0;
 
     // generate the sprite's axes, completely parallel to the viewplane.

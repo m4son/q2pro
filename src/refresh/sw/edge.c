@@ -19,21 +19,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "sw.h"
 
-#if !USE_ASM
-void R_SurfacePatch(void)
-{
-}
-
-void R_EdgeCodeStart(void)
-{
-}
-
-void R_EdgeCodeEnd(void)
-{
-}
-#endif
-
-
 /*
 the complex cases add new polys on most lines, so dont optimize for keeping them the same
 have multiple free span lists to try to get better coherence?
@@ -56,40 +41,27 @@ surf_t  *surfaces, *surface_p, *surf_max;
 edge_t  *newedges[MAXHEIGHT];
 edge_t  *removeedges[MAXHEIGHT];
 
-espan_t *span_p, *max_span_p;
+static espan_t  *span_p, *max_span_p;
 
 int     r_currentkey;
 
-int current_iv;
+static int      current_iv;
 
-int edge_head_u_shift20, edge_tail_u_shift20;
+static int      edge_head_u_shift20, edge_tail_u_shift20;
 
-static void (*pdrawfunc)(void);
+static void     (*pdrawfunc)(void);
 
-edge_t  edge_head;
-edge_t  edge_tail;
-edge_t  edge_aftertail;
-edge_t  edge_sentinel;
+static edge_t   edge_head;
+static edge_t   edge_tail;
+static edge_t   edge_aftertail;
+static edge_t   edge_sentinel;
 
-float   fv;
+static float    fv;
 
 static int  miplevel;
 
-float       scale_for_mip;
-int         ubasestep, errorterm, erroradjustup, erroradjustdown;
-
-// FIXME: should go away
-extern void         R_RotateBmodel(void);
-extern void         R_TransformFrustum(void);
-
-
-
-void R_GenerateSpans(void);
-void R_GenerateSpansBackward(void);
-
-void R_LeadingEdge(edge_t *edge);
-void R_LeadingEdgeBackwards(edge_t *edge);
-void R_TrailingEdge(surf_t *surf, edge_t *edge);
+static void R_GenerateSpans(void);
+static void R_GenerateSpansBackward(void);
 
 
 /*
@@ -113,7 +85,7 @@ void R_BeginEdgeFrame(void)
     edge_max = &r_edges[r_numallocatededges];
 
     surface_p = &surfaces[2];   // background is surface 1,
-    //  surface 0 is a dummy
+                                // surface 0 is a dummy
     surfaces[1].spans = NULL;   // no background spans yet
     surfaces[1].flags = DSURF_BACKGROUND;
 
@@ -135,19 +107,18 @@ void R_BeginEdgeFrame(void)
 }
 
 
-#if !USE_ASM
-
 /*
 ==============
 R_InsertNewEdges
 
 Adds the edges in the linked list edgestoadd, adding them to the edges in the
-linked list edgelist.  edgestoadd is assumed to be sorted on u, and non-empty (this is actually newedges[v]).  edgelist is assumed to be sorted on u, with a
+linked list edgelist.  edgestoadd is assumed to be sorted on u, and non-empty
+(this is actually newedges[v]).  edgelist is assumed to be sorted on u, with a
 sentinel at the end (actually, this is the active edge table starting at
 edge_head.next).
 ==============
 */
-void R_InsertNewEdges(edge_t *edgestoadd, edge_t *edgelist)
+static void R_InsertNewEdges(edge_t *edgestoadd, edge_t *edgelist)
 {
     edge_t  *next_edge;
 
@@ -182,7 +153,7 @@ addedge:
 R_RemoveEdges
 ==============
 */
-void R_RemoveEdges(edge_t *pedge)
+static void R_RemoveEdges(edge_t *pedge)
 {
 
     do {
@@ -196,7 +167,7 @@ void R_RemoveEdges(edge_t *pedge)
 R_StepActiveU
 ==============
 */
-void R_StepActiveU(edge_t *pedge)
+static void R_StepActiveU(edge_t *pedge)
 {
     edge_t      *pnext_edge, *pwedge;
 
@@ -254,15 +225,13 @@ pushback:
     }
 }
 
-#endif  // !USE_ASM
-
 
 /*
 ==============
 R_CleanupSpan
 ==============
 */
-void R_CleanupSpan(void)
+static void R_CleanupSpan(void)
 {
     surf_t  *surf;
     int     iu;
@@ -294,7 +263,7 @@ void R_CleanupSpan(void)
 R_LeadingEdgeBackwards
 ==============
 */
-void R_LeadingEdgeBackwards(edge_t *edge)
+static void R_LeadingEdgeBackwards(edge_t *edge)
 {
     espan_t         *span;
     surf_t          *surf, *surf2;
@@ -369,7 +338,7 @@ gotposition:
 R_TrailingEdge
 ==============
 */
-void R_TrailingEdge(surf_t *surf, edge_t *edge)
+static void R_TrailingEdge(surf_t *surf, edge_t *edge)
 {
     espan_t         *span;
     int             iu;
@@ -400,14 +369,12 @@ void R_TrailingEdge(surf_t *surf, edge_t *edge)
 }
 
 
-#if !USE_ASM
-
 /*
 ==============
 R_LeadingEdge
 ==============
 */
-void R_LeadingEdge(edge_t *edge)
+static void R_LeadingEdge(edge_t *edge)
 {
     espan_t         *span;
     surf_t          *surf, *surf2;
@@ -520,7 +487,7 @@ gotposition:
 R_GenerateSpans
 ==============
 */
-void R_GenerateSpans(void)
+static void R_GenerateSpans(void)
 {
     edge_t          *edge;
     surf_t          *surf;
@@ -547,15 +514,13 @@ void R_GenerateSpans(void)
     R_CleanupSpan();
 }
 
-#endif  // !USE_ASM
-
 
 /*
 ==============
 R_GenerateSpansBackward
 ==============
 */
-void R_GenerateSpansBackward(void)
+static void R_GenerateSpansBackward(void)
 {
     edge_t          *edge;
 
@@ -691,18 +656,15 @@ SURFACE FILLING
 =========================================================================
 */
 
-mface_t     *pface;
-surfcache_t     *pcurrentcache;
-vec3_t          transformed_modelorg;
-vec3_t          world_transformed_modelorg;
-vec3_t          local_modelorg;
+static vec3_t       transformed_modelorg;
+static vec3_t       world_transformed_modelorg;
 
 /*
 =============
 D_MipLevelForScale
 =============
 */
-int D_MipLevelForScale(float scale)
+static int D_MipLevelForScale(float scale)
 {
     int     lmiplevel;
 
@@ -729,14 +691,14 @@ D_FlatFillSurface
 Simple single color fill with no texture mapping
 ==============
 */
-void D_FlatFillSurface(surf_t *surf, uint32_t color)
+static void D_FlatFillSurface(surf_t *surf, uint32_t color)
 {
     espan_t *span;
     byte    *pdest;
     int     count;
 
     for (span = surf->spans; span; span = span->pnext) {
-        pdest = (byte *)d_viewbuffer + d_scantable[span->v] + span->u * VID_BYTES;
+        pdest = d_spantable[span->v] + span->u * VID_BYTES;
         count = span->count;
         do {
             pdest[0] = color & 0xff;
@@ -753,7 +715,7 @@ void D_FlatFillSurface(surf_t *surf, uint32_t color)
 D_CalcGradients
 ==============
 */
-void D_CalcGradients(mface_t *pface)
+static void D_CalcGradients(mface_t *pface)
 {
     float       mipscale;
     vec3_t      p_temp1;
@@ -765,18 +727,20 @@ void D_CalcGradients(mface_t *pface)
     R_TransformVector(pface->texinfo->axis[0], p_saxis);
     R_TransformVector(pface->texinfo->axis[1], p_taxis);
 
-    t = xscaleinv * mipscale;
+    t = r_refdef.xscaleinv * mipscale;
     d_sdivzstepu = p_saxis[0] * t;
     d_tdivzstepu = p_taxis[0] * t;
 
-    t = yscaleinv * mipscale;
+    t = r_refdef.yscaleinv * mipscale;
     d_sdivzstepv = -p_saxis[1] * t;
     d_tdivzstepv = -p_taxis[1] * t;
 
-    d_sdivzorigin = p_saxis[2] * mipscale - xcenter * d_sdivzstepu -
-                    ycenter * d_sdivzstepv;
-    d_tdivzorigin = p_taxis[2] * mipscale - xcenter * d_tdivzstepu -
-                    ycenter * d_tdivzstepv;
+    d_sdivzorigin = p_saxis[2] * mipscale -
+                    r_refdef.xcenter * d_sdivzstepu -
+                    r_refdef.ycenter * d_sdivzstepv;
+    d_tdivzorigin = p_taxis[2] * mipscale -
+                    r_refdef.xcenter * d_tdivzstepu -
+                    r_refdef.ycenter * d_tdivzstepv;
 
     VectorScale(transformed_modelorg, mipscale, p_temp1);
 
@@ -788,14 +752,12 @@ void D_CalcGradients(mface_t *pface)
               ((pface->texturemins[1] << 16) >> miplevel)
               + pface->texinfo->offset[1] * t;
 
-    // PGM - changing flow speed for non-warping textures.
     if (pface->texinfo->c.flags & SURF_FLOWING) {
         if (pface->texinfo->c.flags & SURF_WARP)
             sadjust += 0x10000 * (-128 * ((r_newrefdef.time * 0.25) - (int)(r_newrefdef.time * 0.25)));
         else
             sadjust += 0x10000 * (-128 * ((r_newrefdef.time * 0.77) - (int)(r_newrefdef.time * 0.77)));
     }
-    // PGM
 
 //
 // -1 (-epsilon) so we never wander off the edge of the texture
@@ -812,7 +774,7 @@ D_BackgroundSurf
 The grey background filler seen when there is a hole in the map
 ==============
 */
-void D_BackgroundSurf(surf_t *s)
+static void D_BackgroundSurf(surf_t *s)
 {
 // set up a gradient for the background surface that places it
 // effectively at infinity distance from the viewpoint
@@ -829,8 +791,10 @@ void D_BackgroundSurf(surf_t *s)
 D_TurbulentSurf
 =================
 */
-void D_TurbulentSurf(surf_t *s)
+static void D_TurbulentSurf(surf_t *s)
 {
+    mface_t         *pface;
+
     d_zistepu = s->d_zistepu;
     d_zistepv = s->d_zistepv;
     d_ziorigin = s->d_ziorigin;
@@ -838,19 +802,20 @@ void D_TurbulentSurf(surf_t *s)
     pface = s->msurf;
     miplevel = 0;
     cacheblock = pface->texinfo->image->pixels[0];
-    cachewidth = 64 * TEX_BYTES;
+    cachewidth = TURB_SIZE * TEX_BYTES;
 
     if (s->insubmodel) {
+        vec3_t       local_modelorg;
+
         // FIXME: we don't want to do all this for every polygon!
         // TODO: store once at start of frame
-        currententity = s->entity;  //FIXME: make this passed in to
-        // R_RotateBmodel ()
-        VectorSubtract(r_origin, currententity->origin,
-                       local_modelorg);
+        currententity = s->entity;  // FIXME: make this passed in to
+                                    // R_RotateBmodel ()
+        VectorSubtract(r_origin, currententity->origin, local_modelorg);
         R_TransformVector(local_modelorg, transformed_modelorg);
 
         R_RotateBmodel();   // FIXME: don't mess with the frustum,
-        // make entity passed in
+                            // make entity passed in
     }
 
     D_CalcGradients(pface);
@@ -870,8 +835,7 @@ void D_TurbulentSurf(surf_t *s)
         // TODO: speed up
         //
         currententity = NULL;   // &r_worldentity;
-        VectorCopy(world_transformed_modelorg,
-                   transformed_modelorg);
+        VectorCopy(world_transformed_modelorg, transformed_modelorg);
         VectorCopy(base_vpn, vpn);
         VectorCopy(base_vup, vup);
         VectorCopy(base_vright, vright);
@@ -884,8 +848,10 @@ void D_TurbulentSurf(surf_t *s)
 D_SkySurf
 ==============
 */
-void D_SkySurf(surf_t *s)
+static void D_SkySurf(surf_t *s)
 {
+    mface_t         *pface;
+
     pface = s->msurf;
     miplevel = 0;
 
@@ -920,29 +886,34 @@ D_SolidSurf
 Normal surface cached, texture mapped surface
 ==============
 */
-void D_SolidSurf(surf_t *s)
+static void D_SolidSurf(surf_t *s)
 {
+    surfcache_t     *pcurrentcache;
+    mface_t         *pface;
+
     d_zistepu = s->d_zistepu;
     d_zistepv = s->d_zistepv;
     d_ziorigin = s->d_ziorigin;
 
     if (s->insubmodel) {
+        vec3_t       local_modelorg;
+
         // FIXME: we don't want to do all this for every polygon!
         // TODO: store once at start of frame
-        currententity = s->entity;  //FIXME: make this passed in to
-        // R_RotateBmodel ()
+        currententity = s->entity;  // FIXME: make this passed in to
+                                    // R_RotateBmodel ()
         VectorSubtract(r_origin, currententity->origin, local_modelorg);
         R_TransformVector(local_modelorg, transformed_modelorg);
 
         R_RotateBmodel();   // FIXME: don't mess with the frustum,
-        // make entity passed in
-    } else
+                            // make entity passed in
+    } else {
         currententity = &r_worldentity;
+    }
 
     pface = s->msurf;
 
-    miplevel = D_MipLevelForScale(s->nearzi * scale_for_mip * pface->texinfo->mipadjust);
-
+    miplevel = D_MipLevelForScale(s->nearzi * r_refdef.scale_for_mip * pface->texinfo->mipadjust);
 
 // FIXME: make this passed in to D_CacheSurface
     pcurrentcache = D_CacheSurface(pface, miplevel);
@@ -962,8 +933,7 @@ void D_SolidSurf(surf_t *s)
         // FIXME: we don't want to do this every time!
         // TODO: speed up
         //
-        VectorCopy(world_transformed_modelorg,
-                   transformed_modelorg);
+        VectorCopy(world_transformed_modelorg, transformed_modelorg);
         VectorCopy(base_vpn, vpn);
         VectorCopy(base_vup, vup);
         VectorCopy(base_vright, vright);
@@ -979,7 +949,7 @@ D_DrawflatSurfaces
 To allow developers to see the polygon carving of the world
 =============
 */
-void D_DrawflatSurfaces(void)
+static void D_DrawflatSurfaces(void)
 {
     surf_t          *s;
 
@@ -1004,7 +974,7 @@ D_DrawZSurfaces
 
 =============
 */
-void D_DrawZSurfaces(void)
+static void D_DrawZSurfaces(void)
 {
     surf_t          *s;
 

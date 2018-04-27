@@ -36,6 +36,7 @@ static void ProcessTexinfo(bsp_t *bsp)
     int i;
     vec_t len1, len2;
     char name[MAX_QPATH];
+    imageflags_t flags;
 
     tex = bsp->texinfo;
     for (i = 0; i < bsp->numtexinfo; i++, tex++) {
@@ -51,9 +52,14 @@ static void ProcessTexinfo(bsp_t *bsp)
         else
             tex->mipadjust = 1;
 
+        if (tex->c.flags & (SURF_WARP | SURF_FLOWING))
+            flags = IF_TURBULENT;
+        else
+            flags = IF_NONE;
+
         Q_concat(name, sizeof(name), "textures/", tex->name, ".wal", NULL);
         FS_NormalizePath(name, name);
-        tex->image = IMG_Find(name, IT_WALL);
+        tex->image = IMG_Find(name, IT_WALL, flags);
     }
 }
 
@@ -196,8 +202,8 @@ qerror_t MOD_LoadMD2(model_t *model, const void *rawdata, size_t length)
     dst_tri = model->tris;
     for (i = 0; i < header.num_tris; i++, src_tri++, dst_tri++) {
         for (j = 0; j < 3; j++) {
-            unsigned idx_xyz = LittleShort(src_tri->index_xyz[j]);
-            unsigned idx_st = LittleShort(src_tri->index_st[j]);
+            uint16_t idx_xyz = LittleShort(src_tri->index_xyz[j]);
+            uint16_t idx_st = LittleShort(src_tri->index_st[j]);
 
             if (idx_xyz >= header.num_xyz || idx_st >= header.num_st) {
                 ret = Q_ERR_BAD_INDEX;
@@ -212,12 +218,24 @@ qerror_t MOD_LoadMD2(model_t *model, const void *rawdata, size_t length)
     // load base s and t vertices
     model->sts = MOD_Malloc(header.num_st * sizeof(maliasst_t));
     model->numsts = header.num_st;
+    model->skinwidth = header.skinwidth;
+    model->skinheight = header.skinheight;
 
     src_st = (dmd2stvert_t *)((byte *)rawdata + header.ofs_st);
     dst_st = model->sts;
     for (i = 0; i < header.num_st; i++, src_st++, dst_st++) {
         dst_st->s = (int16_t)LittleShort(src_st->s);
         dst_st->t = (int16_t)LittleShort(src_st->t);
+
+        if (dst_st->s < 0 || dst_st->s >= header.skinwidth) {
+            ret = Q_ERR_BAD_INDEX;
+            goto fail;
+        }
+
+        if (dst_st->t < 0 || dst_st->t >= header.skinheight) {
+            ret = Q_ERR_BAD_INDEX;
+            goto fail;
+        }
     }
 
     // load the frames
@@ -232,11 +250,18 @@ qerror_t MOD_LoadMD2(model_t *model, const void *rawdata, size_t length)
             dst_frame->scale[j] = LittleFloat(src_frame->scale[j]);
             dst_frame->translate[j] = LittleFloat(src_frame->translate[j]);
         }
+
         // verts are all 8 bit, so no swapping needed
         dst_frame->verts = MOD_Malloc(header.num_xyz * sizeof(maliasvert_t));
-
-        // TODO: check normal indices
         memcpy(dst_frame->verts, src_frame->verts, header.num_xyz * sizeof(maliasvert_t));
+
+        // check normal indices
+        for (j = 0; j < header.num_xyz; j++) {
+            if (dst_frame->verts[j].lightnormalindex > NUMVERTEXNORMALS) {
+                ret = Q_ERR_BAD_INDEX;
+                goto fail;
+            }
+        }
 
         src_frame = (dmd2frame_t *)((byte *)src_frame + header.framesize);
     }
@@ -249,7 +274,7 @@ qerror_t MOD_LoadMD2(model_t *model, const void *rawdata, size_t length)
             goto fail;
         }
         FS_NormalizePath(skinname, skinname);
-        model->skins[i] = IMG_Find(skinname, IT_SKIN);
+        model->skins[i] = IMG_Find(skinname, IT_SKIN, IF_NONE);
         src_skin += MD2_MAX_SKINNAME;
     }
     model->numskins = header.num_skins;

@@ -20,6 +20,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "client.h"
 
 extern qhandle_t cl_mod_powerscreen;
+extern qhandle_t cl_mod_laser;
+extern qhandle_t cl_mod_dmspot;
 extern qhandle_t cl_sfx_footsteps[4];
 
 /*
@@ -45,7 +47,7 @@ static inline qboolean entity_optimized(const entity_state_t *state)
 }
 
 static inline void
-entity_new(centity_t *ent, const entity_state_t *state, const vec_t *origin)
+entity_update_new(centity_t *ent, const entity_state_t *state, const vec_t *origin)
 {
     ent->trailcount = 1024;     // for diminishing rocket / grenade trails
 
@@ -71,7 +73,7 @@ entity_new(centity_t *ent, const entity_state_t *state, const vec_t *origin)
 }
 
 static inline void
-entity_old(centity_t *ent, const entity_state_t *state, const vec_t *origin)
+entity_update_old(centity_t *ent, const entity_state_t *state, const vec_t *origin)
 {
     int event = state->event;
 
@@ -91,10 +93,10 @@ entity_old(centity_t *ent, const entity_state_t *state, const vec_t *origin)
         || state->modelindex4 != ent->current.modelindex4
         || event == EV_PLAYER_TELEPORT
         || event == EV_OTHER_TELEPORT
-        || abs(origin[0] - ent->current.origin[0]) > 512
-        || abs(origin[1] - ent->current.origin[1]) > 512
-        || abs(origin[2] - ent->current.origin[2]) > 512
-        || cl_nolerp->integer) {
+        || fabs(origin[0] - ent->current.origin[0]) > 512
+        || fabs(origin[1] - ent->current.origin[1]) > 512
+        || fabs(origin[2] - ent->current.origin[2]) > 512
+        || cl_nolerp->integer == 1) {
         // some data changes will force no lerping
         ent->trailcount = 1024;     // for diminishing rocket / grenade trails
 
@@ -124,6 +126,26 @@ entity_old(centity_t *ent, const entity_state_t *state, const vec_t *origin)
     ent->prev = ent->current;
 }
 
+static inline qboolean entity_new(const centity_t *ent)
+{
+    if (!cl.oldframe.valid)
+        return qtrue;   // last received frame was invalid
+
+    if (ent->serverframe != cl.oldframe.number)
+        return qtrue;   // wasn't in last received frame
+
+    if (cl_nolerp->integer == 2)
+        return qtrue;   // developer option, always new
+
+    if (cl_nolerp->integer == 3)
+        return qfalse;  // developer option, lerp from last received frame
+
+    if (cl.oldframe.number != cl.frame.number - 1)
+        return qtrue;   // previous server frame was dropped
+
+    return qfalse;
+}
+
 static void entity_update(const entity_state_t *state)
 {
     centity_t *ent = &cl_entities[state->number];
@@ -131,7 +153,8 @@ static void entity_update(const entity_state_t *state)
     vec3_t origin_v;
 
     // if entity is solid, decode mins/maxs and add to the list
-    if (state->solid && state->number != cl.frame.clientNum + 1) {
+    if (state->solid && state->number != cl.frame.clientNum + 1
+        && cl.numSolidEntities < MAX_PACKET_ENTITIES) {
         cl.solidEntities[cl.numSolidEntities++] = ent;
         if (state->solid != PACKED_BSP) {
             // encoded bbox
@@ -151,11 +174,11 @@ static void entity_update(const entity_state_t *state)
         origin = state->origin;
     }
 
-    if (ent->serverframe != cl.oldframe.number) {
+    if (entity_new(ent)) {
         // wasn't in last update, so initialize some things
-        entity_new(ent, state, origin);
+        entity_update_new(ent, state, origin);
     } else {
-        entity_old(ent, state, origin);
+        entity_update_old(ent, state, origin);
     }
 
     ent->serverframe = cl.frame.number;
@@ -209,14 +232,25 @@ static void entity_event(int number)
 
 static void set_active_state(void)
 {
+    cls.state = ca_active;
+
     cl.serverdelta = Q_align(cl.frame.number, CL_FRAMEDIV);
     cl.time = cl.servertime = 0; // set time, needed for demos
 #if USE_FPS
     cl.keytime = cl.keyservertime = 0;
+    cl.keyframe = cl.frame; // initialize keyframe to make sure it's valid
 #endif
-    cls.state = ca_active;
+
+    // initialize oldframe so lerping doesn't hurt anything
     cl.oldframe.valid = qfalse;
+    cl.oldframe.ps = cl.frame.ps;
+#if USE_FPS
+    cl.oldkeyframe.valid = qfalse;
+    cl.oldkeyframe.ps = cl.keyframe.ps;
+#endif
+
     cl.frameflags = 0;
+
     if (cls.netchan) {
         cl.initialSeq = cls.netchan->outgoing_sequence;
     }
@@ -300,7 +334,7 @@ player_update(server_frame_t *oldframe, server_frame_t *frame, int framediv)
         goto dup;
 
     // developer option
-    if (cl_nolerp->integer)
+    if (cl_nolerp->integer == 1)
         goto dup;
 
     return;
@@ -323,6 +357,7 @@ void CL_DeltaFrame(void)
     entity_state_t      *state;
     int                 i, j;
     int                 framenum;
+    int                 prevstate = cls.state;
 
     // getting a valid frame message ends the connection process
     if (cls.state == ca_precached)
@@ -359,6 +394,11 @@ void CL_DeltaFrame(void)
         CL_EmitDemoFrame();
     }
 
+    if (prevstate == ca_precached)
+        CL_GTV_Resume();
+    else
+        CL_GTV_EmitFrame();
+
     if (cls.demo.playback) {
         // this delta has nothing to do with local viewangles,
         // clear it to avoid interfering with demo freelook hack
@@ -385,7 +425,7 @@ void CL_DeltaFrame(void)
 // for debugging problems when out-of-date entity origin is referenced
 void CL_CheckEntityPresent(int entnum, const char *what)
 {
-    centity_t *e = &cl_entities[entnum];
+    centity_t *e;
 
     if (entnum == cl.frame.clientNum + 1) {
         return; // player entity = current
@@ -476,8 +516,7 @@ static void CL_AddPacketEntities(void)
             effects |= EF_COLOR_SHELL;
             renderfx |= RF_SHELL_BLUE;
         }
-//======
-// PMM
+
         if (effects & EF_DOUBLE) {
             effects &= ~EF_DOUBLE;
             effects |= EF_COLOR_SHELL;
@@ -489,8 +528,6 @@ static void CL_AddPacketEntities(void)
             effects |= EF_COLOR_SHELL;
             renderfx |= RF_SHELL_HALF_DAM;
         }
-// pmm
-//======
 
         // optionally remove the glowing effect
         if (cl_noglow->integer)
@@ -575,20 +612,18 @@ static void CL_AddPacketEntities(void)
                     ent.model = cl.baseclientinfo.model;
                     ci = &cl.baseclientinfo;
                 }
-//============
-//PGM
                 if (renderfx & RF_USE_DISGUISE) {
                     char buffer[MAX_QPATH];
 
                     Q_concat(buffer, sizeof(buffer), "players/", ci->model_name, "/disguise.pcx", NULL);
                     ent.skin = R_RegisterSkin(buffer);
                 }
-//PGM
-//============
             } else {
                 ent.skinnum = s1->skinnum;
                 ent.skin = 0;
                 ent.model = cl.model_draw[s1->modelindex];
+                if (ent.model == cl_mod_laser || ent.model == cl_mod_dmspot)
+                    renderfx |= RF_NOSHADOW;
             }
         }
 
@@ -607,9 +642,7 @@ static void CL_AddPacketEntities(void)
             ent.angles[0] = 0;
             ent.angles[1] = autorotate;
             ent.angles[2] = 0;
-        }
-        // RAFAEL
-        else if (effects & EF_SPINNINGLIGHTS) {
+        } else if (effects & EF_SPINNINGLIGHTS) {
             vec3_t forward;
             vec3_t start;
 
@@ -637,10 +670,10 @@ static void CL_AddPacketEntities(void)
                 V_AddLight(ent.origin, 225, 1.0, 0.1, 0.1);
             else if (effects & EF_FLAG2)
                 V_AddLight(ent.origin, 225, 0.1, 0.1, 1.0);
-            else if (effects & EF_TAGTRAIL)                     //PGM
-                V_AddLight(ent.origin, 225, 1.0, 1.0, 0.0);     //PGM
-            else if (effects & EF_TRACKERTRAIL)                 //PGM
-                V_AddLight(ent.origin, 225, -1.0, -1.0, -1.0);  //PGM
+            else if (effects & EF_TAGTRAIL)
+                V_AddLight(ent.origin, 225, 1.0, 1.0, 0.0);
+            else if (effects & EF_TRACKERTRAIL)
+                V_AddLight(ent.origin, 225, -1.0, -1.0, -1.0);
 
             if (!cl.thirdPersonView) {
 #if 0
@@ -661,7 +694,6 @@ static void CL_AddPacketEntities(void)
             ent.alpha = 0.30;
         }
 
-        // RAFAEL
         if (effects & EF_PLASMA) {
             ent.flags |= RF_TRANSLUCENT;
             ent.alpha = 0.6;
@@ -669,13 +701,11 @@ static void CL_AddPacketEntities(void)
 
         if (effects & EF_SPHERETRANS) {
             ent.flags |= RF_TRANSLUCENT;
-            // PMM - *sigh*  yet more EF overloading
             if (effects & EF_TRACKERTRAIL)
                 ent.alpha = 0.6;
             else
                 ent.alpha = 0.3;
         }
-//pmm
 
         // add to refresh list
         V_AddEntity(&ent);
@@ -711,7 +741,6 @@ static void CL_AddPacketEntities(void)
                     }
                 }
             }
-            // pmm
             ent.flags = renderfx | RF_TRANSLUCENT;
             ent.alpha = 0.30;
             V_AddEntity(&ent);
@@ -741,24 +770,23 @@ static void CL_AddPacketEntities(void)
                 ent.model = cl.model_draw[s1->modelindex2];
 
             // PMM - check for the defender sphere shell .. make it translucent
-            // replaces the previous version which used the high bit on modelindex2 to determine transparency
             if (!Q_strcasecmp(cl.configstrings[CS_MODELS + (s1->modelindex2)], "models/items/shell/tris.md2")) {
                 ent.alpha = 0.32;
                 ent.flags = RF_TRANSLUCENT;
             }
-            // pmm
 
             V_AddEntity(&ent);
 
             //PGM - make sure these get reset.
             ent.flags = 0;
             ent.alpha = 0;
-            //PGM
         }
+
         if (s1->modelindex3) {
             ent.model = cl.model_draw[s1->modelindex3];
             V_AddEntity(&ent);
         }
+
         if (s1->modelindex4) {
             ent.model = cl.model_draw[s1->modelindex4];
             V_AddEntity(&ent);
@@ -774,30 +802,24 @@ static void CL_AddPacketEntities(void)
         }
 
         // add automatic particle trails
-        if ((effects&~EF_ROTATE)) {
+        if (effects & ~EF_ROTATE) {
             if (effects & EF_ROCKET) {
                 if (!(cl_disable_particles->integer & NOPART_ROCKET_TRAIL)) {
                     CL_RocketTrail(cent->lerp_origin, ent.origin, cent);
                 }
                 V_AddLight(ent.origin, 200, 1, 1, 0);
-            }
-            // PGM - Do not reorder EF_BLASTER and EF_HYPERBLASTER.
-            // EF_BLASTER | EF_TRACKER is a special case for EF_BLASTER2... Cheese!
-            else if (effects & EF_BLASTER) {
-//              CL_BlasterTrail (cent->lerp_origin, ent.origin);
-//PGM
-                if (effects & EF_TRACKER) { // lame... problematic?
+            } else if (effects & EF_BLASTER) {
+                if (effects & EF_TRACKER) {
                     CL_BlasterTrail2(cent->lerp_origin, ent.origin);
                     V_AddLight(ent.origin, 200, 0, 1, 0);
                 } else {
                     CL_BlasterTrail(cent->lerp_origin, ent.origin);
                     V_AddLight(ent.origin, 200, 1, 1, 0);
                 }
-//PGM
             } else if (effects & EF_HYPERBLASTER) {
-                if (effects & EF_TRACKER)                       // PGM  overloaded for blaster2.
-                    V_AddLight(ent.origin, 200, 0, 1, 0);       // PGM
-                else                                            // PGM
+                if (effects & EF_TRACKER)
+                    V_AddLight(ent.origin, 200, 0, 1, 0);
+                else
                     V_AddLight(ent.origin, 200, 1, 1, 0);
             } else if (effects & EF_GIB) {
                 CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, effects);
@@ -820,9 +842,7 @@ static void CL_AddPacketEntities(void)
 #endif
                 }
                 V_AddLight(ent.origin, i, 0, 1, 0);
-            }
-            // RAFAEL
-            else if (effects & EF_TRAP) {
+            } else if (effects & EF_TRAP) {
                 ent.origin[2] += 32;
                 CL_TrapParticles(&ent);
 #if USE_DLIGHTS
@@ -835,10 +855,7 @@ static void CL_AddPacketEntities(void)
             } else if (effects & EF_FLAG2) {
                 CL_FlagTrail(cent->lerp_origin, ent.origin, 115);
                 V_AddLight(ent.origin, 225, 0.1, 0.1, 1);
-            }
-//======
-//ROGUE
-            else if (effects & EF_TAGTRAIL) {
+            } else if (effects & EF_TAGTRAIL) {
                 CL_TagTrail(cent->lerp_origin, ent.origin, 220);
                 V_AddLight(ent.origin, 225, 1.0, 1.0, 0.0);
             } else if (effects & EF_TRACKERTRAIL) {
@@ -855,26 +872,15 @@ static void CL_AddPacketEntities(void)
                 }
             } else if (effects & EF_TRACKER) {
                 CL_TrackerTrail(cent->lerp_origin, ent.origin, 0);
-                // FIXME - check out this effect in rendition
                 V_AddLight(ent.origin, 200, -1, -1, -1);
-            }
-//ROGUE
-//======
-            // RAFAEL
-            else if (effects & EF_GREENGIB) {
+            } else if (effects & EF_GREENGIB) {
                 CL_DiminishingTrail(cent->lerp_origin, ent.origin, cent, effects);
-            }
-            // RAFAEL
-            else if (effects & EF_IONRIPPER) {
+            } else if (effects & EF_IONRIPPER) {
                 CL_IonripperTrail(cent->lerp_origin, ent.origin);
                 V_AddLight(ent.origin, 100, 1, 0.5, 0.5);
-            }
-            // RAFAEL
-            else if (effects & EF_BLUEHYPERBLASTER) {
+            } else if (effects & EF_BLUEHYPERBLASTER) {
                 V_AddLight(ent.origin, 200, 0, 0, 1);
-            }
-            // RAFAEL
-            else if (effects & EF_PLASMA) {
+            } else if (effects & EF_PLASMA) {
                 if (effects & EF_ANIM_ALLFAST) {
                     CL_BlasterTrail(cent->lerp_origin, ent.origin);
                 }
@@ -930,7 +936,7 @@ static void CL_AddViewWeapon(void)
         return;
     }
 
-    if (info_hand->integer == 2) {
+    if (info_hand->integer == 2 && cl_gun->integer == 1) {
         return;
     }
 
@@ -979,7 +985,7 @@ static void CL_AddViewWeapon(void)
     }
 
     gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
-    if (info_hand->integer == 1) {
+    if ((info_hand->integer == 1 && cl_gun->integer == 1) || cl_gun->integer == 3) {
         gun.flags |= RF_LEFTHAND;
     }
 
@@ -1105,6 +1111,30 @@ static inline float LerpShort(int a2, int a1, float frac)
 }
 #endif
 
+static inline float lerp_client_fov(float ofov, float nfov, float lerp)
+{
+    if (cls.demo.playback) {
+        float fov = info_fov->value;
+
+        if (fov < 1)
+            fov = 90;
+        else if (fov > 160)
+            fov = 160;
+
+        if (info_uf->integer & UF_LOCALFOV)
+            return fov;
+
+        if (!(info_uf->integer & UF_PLAYERFOV)) {
+            if (ofov >= 90)
+                ofov = fov;
+            if (nfov >= 90)
+                nfov = fov;
+        }
+    }
+
+    return ofov + lerp * (nfov - ofov);
+}
+
 /*
 ===============
 CL_CalcViewValues
@@ -1118,7 +1148,11 @@ void CL_CalcViewValues(void)
 {
     player_state_t *ps, *ops;
     vec3_t viewoffset;
-    float fov, lerp;
+    float lerp;
+
+    if (!cl.frame.valid) {
+        return;
+    }
 
     // find states to interpolate between
     ps = &cl.frame.ps;
@@ -1135,7 +1169,7 @@ void CL_CalcViewValues(void)
         VectorMA(cl.predicted_origin, backlerp, cl.prediction_error, cl.refdef.vieworg);
 
         // smooth out stair climbing
-        if (cl.predicted_step < 16) {
+        if (cl.predicted_step < 127 * 0.125f) {
             delta <<= 1; // small steps
         }
         if (delta < 100) {
@@ -1177,19 +1211,6 @@ void CL_CalcViewValues(void)
     cl.delta_angles[2] = LerpShort(ops->pmove.delta_angles[2], ps->pmove.delta_angles[2], lerp);
 #endif
 
-    if (cls.demo.playback && (info_uf->integer & UF_LOCALFOV)) {
-        fov = info_fov->value;
-        if (fov < 1) {
-            fov = 90;
-        } else if (fov > 160) {
-            fov = 160;
-        }
-        cl.fov_x = fov;
-    } else {
-        // interpolate field of view
-        cl.fov_x = ops->fov + lerp * (ps->fov - ops->fov);
-    }
-
     // don't interpolate blend color
     Vector4Copy(ps->blend, cl.refdef.blend);
 
@@ -1199,6 +1220,10 @@ void CL_CalcViewValues(void)
 
     lerp = cl.keylerpfrac;
 #endif
+
+    // interpolate field of view
+    cl.fov_x = lerp_client_fov(ops->fov, ps->fov, lerp);
+    cl.fov_y = V_CalcFov(cl.fov_x, 4, 3);
 
     LerpVector(ops->viewoffset, ps->viewoffset, lerp, viewoffset);
 
@@ -1238,9 +1263,7 @@ void CL_AddEntities(void)
 #if USE_DLIGHTS
     CL_AddDLights();
 #endif
-#if USE_LIGHTSTYLES
     CL_AddLightStyles();
-#endif
     LOC_AddLocationsToScene();
 }
 

@@ -21,11 +21,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "sw.h"
 
 // TODO: put in span spilling to shrink list size
-// !!! if this is changed, it must be changed in d_polysa.s too !!!
 #define DPS_MAXSPANS            MAXHEIGHT+1
 // 1 extra for spanpackage that marks end
 
-// !!! if this is changed, it must be changed in asm_draw.h too !!!
 typedef struct {
     void            *pdest;
     short           *pz;
@@ -48,9 +46,9 @@ typedef struct {
 
 aliastriangleparms_t aliastriangleparms;
 
-int r_p0[6], r_p1[6], r_p2[6];
+static int  r_p0[6], r_p1[6], r_p2[6];
 
-int         d_xdenom;
+static int  d_xdenom;
 
 static const edgetable_t    *pedgetable;
 
@@ -69,23 +67,24 @@ static const edgetable_t    edgetables[12] = {
     {0, 1, r_p0, r_p2, NULL, 1, r_p0, r_p1, NULL},
 };
 
-// FIXME: some of these can become statics
-int             a_sstepxfrac, a_tstepxfrac, r_lstepx, a_ststepxwhole;
-int             r_sstepx, r_tstepx, r_lstepy, r_sstepy, r_tstepy;
-int             r_zistepx, r_zistepy;
-int             d_aspancount, d_countextrastep;
+static int  a_sstepxfrac, a_tstepxfrac, r_lstepx, a_ststepxwhole;
+static int  r_sstepx, r_tstepx, r_lstepy, r_sstepy, r_tstepy;
+static int  r_zistepx, r_zistepy;
+static int  d_aspancount, d_countextrastep;
 
-spanpackage_t           *a_spans;
-spanpackage_t           *d_pedgespanpackage;
-byte                    *d_pdest, *d_ptex;
-short                   *d_pz;
-int                     d_sfrac, d_tfrac, d_light, d_zi;
-int                     d_ptexextrastep, d_sfracextrastep;
-int                     d_tfracextrastep, d_lightextrastep, d_pdestextrastep;
-int                     d_lightbasestep, d_pdestbasestep, d_ptexbasestep;
-int                     d_sfracbasestep, d_tfracbasestep;
-int                     d_ziextrastep, d_zibasestep;
-int                     d_pzextrastep, d_pzbasestep;
+static int  ubasestep, errorterm, erroradjustup, erroradjustdown;
+
+static spanpackage_t    *a_spans;
+static spanpackage_t    *d_pedgespanpackage;
+static byte             *d_pdest, *d_ptex;
+static short            *d_pz;
+static int              d_sfrac, d_tfrac, d_light, d_zi;
+static int              d_ptexextrastep, d_sfracextrastep;
+static int              d_tfracextrastep, d_lightextrastep, d_pdestextrastep;
+static int              d_lightbasestep, d_pdestbasestep, d_ptexbasestep;
+static int              d_sfracbasestep, d_tfracbasestep;
+static int              d_ziextrastep, d_zibasestep;
+static int              d_pzextrastep, d_pzbasestep;
 
 typedef struct {
     int     quotient;
@@ -96,41 +95,14 @@ static const adivtab_t  adivtab[32 * 32] = {
 #include "adivtab.h"
 };
 
-byte    *skintable[MAX_LBM_HEIGHT];
-int     skinwidth;
-byte    *skinstart;
-
 void (*d_pdrawspans)(spanpackage_t *pspanpackage);
 
 void R_PolysetDrawSpansConstant8_Blended(spanpackage_t *pspanpackage);
 void R_PolysetDrawSpans8_Blended(spanpackage_t *pspanpackage);
 void R_PolysetDrawSpans8_Opaque(spanpackage_t *pspanpackage);
 
-void R_PolysetCalcGradients(int skinwidth);
-void R_PolysetSetEdgeTable(void);
-void R_RasterizeAliasPolySmooth(void);
-void R_PolysetScanLeftEdge(int height);
-void R_PolysetScanLeftEdge_C(int height);
-
-/*
-================
-R_PolysetUpdateTables
-================
-*/
-void R_PolysetUpdateTables(void)
-{
-    int     i;
-    byte    *s;
-
-    if (r_affinetridesc.skinwidth != skinwidth ||
-        r_affinetridesc.pskin != skinstart) {
-        skinwidth = r_affinetridesc.skinwidth;
-        skinstart = r_affinetridesc.pskin;
-        s = skinstart;
-        for (i = 0; i < MAX_LBM_HEIGHT; i++, s += skinwidth)
-            skintable[i] = s;
-    }
-}
+static void R_PolysetSetEdgeTable(void);
+static void R_RasterizeAliasPolySmooth(void);
 
 
 /*
@@ -141,14 +113,8 @@ R_DrawTriangle
 void R_DrawTriangle(void)
 {
     spanpackage_t spans[DPS_MAXSPANS];
-
     int dv1_ab, dv0_ac;
     int dv0_ab, dv1_ac;
-
-    /*
-    d_xdenom = (aliastriangleparms.a->v[1] - aliastriangleparms.b->v[1]) * (aliastriangleparms.a->v[0] - aliastriangleparms.c->v[0]) -
-               (aliastriangleparms.a->v[0] - aliastriangleparms.b->v[0]) * (aliastriangleparms.a->v[1] - aliastriangleparms.c->v[1]);
-    */
 
     dv0_ab = aliastriangleparms.a->u - aliastriangleparms.b->u;
     dv1_ab = aliastriangleparms.a->v - aliastriangleparms.b->v;
@@ -196,10 +162,10 @@ void R_DrawTriangle(void)
 
 /*
 ===================
-R_PolysetScanLeftEdge_C
+R_PolysetScanLeftEdge
 ====================
 */
-void R_PolysetScanLeftEdge_C(int height)
+static void R_PolysetScanLeftEdge(int height)
 {
     do {
         d_pedgespanpackage->pdest = d_pdest;
@@ -263,14 +229,12 @@ quotient must fit in 32 bits.
 FIXME: GET RID OF THIS! (FloorDivMod)
 ====================
 */
-void FloorDivMod(float numer, float denom, int *quotient,
-                 int *rem)
+static void FloorDivMod(float numer, float denom, int *quotient, int *rem)
 {
     int     q, r;
     float   x;
 
     if (numer >= 0.0) {
-
         x = floor(numer / denom);
         q = (int)x;
         r = (int)floor(numer - (x * denom));
@@ -297,14 +261,12 @@ void FloorDivMod(float numer, float denom, int *quotient,
 R_PolysetSetUpForLineScan
 ====================
 */
-void R_PolysetSetUpForLineScan(fixed8_t startvertu, fixed8_t startvertv,
-                               fixed8_t endvertu, fixed8_t endvertv)
+static void R_PolysetSetUpForLineScan(fixed8_t startvertu, fixed8_t startvertv,
+                                      fixed8_t endvertu, fixed8_t endvertv)
 {
     float       dm, dn;
     int         tm, tn;
     const adivtab_t *ptemp;
-
-// TODO: implement x86 version
 
     errorterm = -1;
 
@@ -332,8 +294,7 @@ void R_PolysetSetUpForLineScan(fixed8_t startvertu, fixed8_t startvertv,
 R_PolysetCalcGradients
 ================
 */
-
-void R_PolysetCalcGradients(int skinwidth)
+static void R_PolysetCalcGradients(int skinwidth)
 {
     float   xstepdenominv, ystepdenominv, t0, t1;
     float   p01_minus_p21, p11_minus_p21, p00_minus_p20, p10_minus_p20;
@@ -378,16 +339,8 @@ void R_PolysetCalcGradients(int skinwidth)
     r_zistepy = (int)((t1 * p00_minus_p20 - t0 * p10_minus_p20) *
                       ystepdenominv);
 
-#if USE_ASM
-    if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-        a_sstepxfrac = r_sstepx << 16;
-        a_tstepxfrac = r_tstepx << 16;
-    } else
-#endif
-    {
-        a_sstepxfrac = r_sstepx & 0xFFFF;
-        a_tstepxfrac = r_tstepx & 0xFFFF;
-    }
+    a_sstepxfrac = r_sstepx & 0xFFFF;
+    a_tstepxfrac = r_tstepx & 0xFFFF;
 
     a_ststepxwhole = skinwidth * (r_tstepx >> 16) + (r_sstepx >> 16) * TEX_BYTES;
 }
@@ -425,9 +378,15 @@ void R_PolysetDrawSpans8_Blended(spanpackage_t *pspanpackage)
 
             do {
                 if ((lzi >> 16) >= *lpz) {
-                    tmp[0] = (lptex[0] * llight) >> 16;
-                    tmp[1] = (lptex[1] * llight) >> 16;
-                    tmp[2] = (lptex[2] * llight) >> 16;
+                    tmp[0] = (r_aliasblendcolor[0] * llight) >> 15;
+                    tmp[1] = (r_aliasblendcolor[1] * llight) >> 15;
+                    tmp[2] = (r_aliasblendcolor[2] * llight) >> 15;
+                    if (tmp[0] > 255) tmp[0] = 255;
+                    if (tmp[1] > 255) tmp[1] = 255;
+                    if (tmp[2] > 255) tmp[2] = 255;
+                    tmp[0] = (lptex[0] * tmp[0]) >> 8;
+                    tmp[1] = (lptex[1] * tmp[1]) >> 8;
+                    tmp[2] = (lptex[2] * tmp[2]) >> 8;
                     lpdest[0] = (lpdest[0] * r_alias_one_minus_alpha + tmp[2] * r_alias_alpha) >> 8;
                     lpdest[1] = (lpdest[1] * r_alias_one_minus_alpha + tmp[1] * r_alias_alpha) >> 8;
                     lpdest[2] = (lpdest[2] * r_alias_one_minus_alpha + tmp[0] * r_alias_alpha) >> 8;
@@ -492,7 +451,6 @@ void R_PolysetDrawSpansConstant8_Blended(spanpackage_t *pspanpackage)
     } while (pspanpackage->count != -999999);
 }
 
-#if !USE_ASM
 void R_PolysetDrawSpans8_Opaque(spanpackage_t *pspanpackage)
 {
     int     lcount;
@@ -515,6 +473,7 @@ void R_PolysetDrawSpans8_Opaque(spanpackage_t *pspanpackage)
             int     llight;
             int     lzi;
             short   *lpz;
+            int     tmp[3];
 
             lpdest = pspanpackage->pdest;
             lptex = pspanpackage->ptex;
@@ -526,9 +485,15 @@ void R_PolysetDrawSpans8_Opaque(spanpackage_t *pspanpackage)
 
             do {
                 if ((lzi >> 16) >= *lpz) {
-                    lpdest[0] = (lptex[2] * llight) >> 16;
-                    lpdest[1] = (lptex[1] * llight) >> 16;
-                    lpdest[2] = (lptex[0] * llight) >> 16;
+                    tmp[0] = (r_aliasblendcolor[0] * llight) >> 15;
+                    tmp[1] = (r_aliasblendcolor[1] * llight) >> 15;
+                    tmp[2] = (r_aliasblendcolor[2] * llight) >> 15;
+                    if (tmp[0] > 255) tmp[0] = 255;
+                    if (tmp[1] > 255) tmp[1] = 255;
+                    if (tmp[2] > 255) tmp[2] = 255;
+                    lpdest[0] = (lptex[2] * tmp[2]) >> 8;
+                    lpdest[1] = (lptex[1] * tmp[1]) >> 8;
+                    lpdest[2] = (lptex[0] * tmp[0]) >> 8;
                     *lpz = lzi >> 16;
                 }
                 lpdest += VID_BYTES;
@@ -550,66 +515,26 @@ void R_PolysetDrawSpans8_Opaque(spanpackage_t *pspanpackage)
         pspanpackage++;
     } while (pspanpackage->count != -999999);
 }
-#endif
 
-
-/*
-================
-R_RasterizeAliasPolySmooth
-================
-*/
-void R_RasterizeAliasPolySmooth(void)
+static void R_PolysetSetUpAndScanLeftEdge(int *plefttop, int *pleftbottom)
 {
-    int             initialleftheight, initialrightheight;
-    int             *plefttop, *prighttop, *pleftbottom, *prightbottom;
-    int             working_lstepx, originalcount;
-    int             ystart;
+    int     height, ystart;
+    int     working_lstepx;
 
-    plefttop = pedgetable->pleftedgevert0;
-    prighttop = pedgetable->prightedgevert0;
-
-    pleftbottom = pedgetable->pleftedgevert1;
-    prightbottom = pedgetable->prightedgevert1;
-
-    initialleftheight = pleftbottom[1] - plefttop[1];
-    initialrightheight = prightbottom[1] - prighttop[1];
-
-//
-// set the s, t, and light gradients, which are consistent across the triangle
-// because being a triangle, things are affine
-//
-    R_PolysetCalcGradients(r_affinetridesc.skinwidth);
-//
-// rasterize the polygon
-//
-
-//
-// scan out the top (and possibly only) part of the left edge
-//
-    d_pedgespanpackage = a_spans;
-
+    height = pleftbottom[1] - plefttop[1];
     ystart = plefttop[1];
-    d_aspancount = plefttop[0] - prighttop[0];
 
     d_ptex = (byte *)r_affinetridesc.pskin + (plefttop[2] >> 16) * TEX_BYTES +
              (plefttop[3] >> 16) * r_affinetridesc.skinwidth;
-#if USE_ASM
-    if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-        d_sfrac = (plefttop[2] & 0xFFFF) << 16;
-        d_tfrac = (plefttop[3] & 0xFFFF) << 16;
-    } else
-#endif
-    {
-        d_sfrac = plefttop[2] & 0xFFFF;
-        d_tfrac = plefttop[3] & 0xFFFF;
-    }
+    d_sfrac = plefttop[2] & 0xFFFF;
+    d_tfrac = plefttop[3] & 0xFFFF;
     d_light = plefttop[4];
     d_zi = plefttop[5];
 
-    d_pdest = (byte *)d_viewbuffer + d_scantable[ystart] + plefttop[0] * VID_BYTES;
-    d_pz = d_pzbuffer + ystart * d_zwidth + plefttop[0];
+    d_pdest = d_spantable[ystart] + plefttop[0] * VID_BYTES;
+    d_pz = d_zspantable[ystart] + plefttop[0];
 
-    if (initialleftheight == 1) {
+    if (height == 1) {
         d_pedgespanpackage->pdest = d_pdest;
         d_pedgespanpackage->pz = d_pz;
         d_pedgespanpackage->count = d_aspancount;
@@ -627,21 +552,11 @@ void R_RasterizeAliasPolySmooth(void)
         R_PolysetSetUpForLineScan(plefttop[0], plefttop[1],
                                   pleftbottom[0], pleftbottom[1]);
 
-#if USE_ASM
-        if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-            d_pzbasestep = (d_zwidth + ubasestep) << 1;
-            d_pzextrastep = d_pzbasestep + 2;
-        } else
-#endif
-        {
-            d_pzbasestep = d_zwidth + ubasestep;
-            d_pzextrastep = d_pzbasestep + 1;
-        }
+        d_pzbasestep = d_zwidth + ubasestep;
+        d_pzextrastep = d_pzbasestep + 1;
 
-        d_pdestbasestep = r_screenrowbytes + ubasestep * VID_BYTES;
+        d_pdestbasestep = d_screenrowbytes + ubasestep * VID_BYTES;
         d_pdestextrastep = d_pdestbasestep + 1 * VID_BYTES;
-
-        // TODO: can reuse partial expressions here
 
         // for negative steps in x along left edge, bias toward overflow rather than
         // underflow (sort of turning the floor () we did in the gradient calcs into
@@ -655,149 +570,72 @@ void R_RasterizeAliasPolySmooth(void)
         d_ptexbasestep = ((r_sstepy + r_sstepx * ubasestep) >> 16) * TEX_BYTES +
                          ((r_tstepy + r_tstepx * ubasestep) >> 16) *
                          r_affinetridesc.skinwidth;
-#if USE_ASM
-        if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-            d_sfracbasestep = (r_sstepy + r_sstepx * ubasestep) << 16;
-            d_tfracbasestep = (r_tstepy + r_tstepx * ubasestep) << 16;
-        } else
-#endif
-        {
-            d_sfracbasestep = (r_sstepy + r_sstepx * ubasestep) & 0xFFFF;
-            d_tfracbasestep = (r_tstepy + r_tstepx * ubasestep) & 0xFFFF;
-        }
+        d_sfracbasestep = (r_sstepy + r_sstepx * ubasestep) & 0xFFFF;
+        d_tfracbasestep = (r_tstepy + r_tstepx * ubasestep) & 0xFFFF;
         d_lightbasestep = r_lstepy + working_lstepx * ubasestep;
         d_zibasestep = r_zistepy + r_zistepx * ubasestep;
 
         d_ptexextrastep = ((r_sstepy + r_sstepx * d_countextrastep) >> 16) * TEX_BYTES +
                           ((r_tstepy + r_tstepx * d_countextrastep) >> 16) *
                           r_affinetridesc.skinwidth;
-#if USE_ASM
-        if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-            d_sfracextrastep = (r_sstepy + r_sstepx * d_countextrastep) << 16;
-            d_tfracextrastep = (r_tstepy + r_tstepx * d_countextrastep) << 16;
-        } else
-#endif
-        {
-            d_sfracextrastep = (r_sstepy + r_sstepx * d_countextrastep) & 0xFFFF;
-            d_tfracextrastep = (r_tstepy + r_tstepx * d_countextrastep) & 0xFFFF;
-        }
+        d_sfracextrastep = (r_sstepy + r_sstepx * d_countextrastep) & 0xFFFF;
+        d_tfracextrastep = (r_tstepy + r_tstepx * d_countextrastep) & 0xFFFF;
         d_lightextrastep = d_lightbasestep + working_lstepx;
         d_ziextrastep = d_zibasestep + r_zistepx;
 
-#if USE_ASM
-        if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-            R_PolysetScanLeftEdge(initialleftheight);
-        } else
-#endif
-        {
-            R_PolysetScanLeftEdge_C(initialleftheight);
-        }
+        R_PolysetScanLeftEdge(height);
     }
+}
+
+/*
+================
+R_RasterizeAliasPolySmooth
+================
+*/
+static void R_RasterizeAliasPolySmooth(void)
+{
+    int     /*initialleftheight,*/ initialrightheight;
+    int     *plefttop, *prighttop, *pleftbottom, *prightbottom;
+    int     originalcount;
+
+    plefttop = pedgetable->pleftedgevert0;
+    prighttop = pedgetable->prightedgevert0;
+
+    pleftbottom = pedgetable->pleftedgevert1;
+    prightbottom = pedgetable->prightedgevert1;
+
+    /*initialleftheight = pleftbottom[1] - plefttop[1];*/
+    initialrightheight = prightbottom[1] - prighttop[1];
+
+//
+// set the s, t, and light gradients, which are consistent across the triangle
+// because being a triangle, things are affine
+//
+    R_PolysetCalcGradients(r_affinetridesc.skinwidth);
+
+//
+// rasterize the polygon
+//
+
+//
+// scan out the top (and possibly only) part of the left edge
+//
+    d_pedgespanpackage = a_spans;
+
+    d_aspancount = plefttop[0] - prighttop[0];
+
+    R_PolysetSetUpAndScanLeftEdge(plefttop, pleftbottom);
 
 //
 // scan out the bottom part of the left edge, if it exists
 //
     if (pedgetable->numleftedges == 2) {
-        int     height;
-
         plefttop = pleftbottom;
         pleftbottom = pedgetable->pleftedgevert2;
 
-        height = pleftbottom[1] - plefttop[1];
-
-// TODO: make this a function; modularize this function in general
-
-        ystart = plefttop[1];
         d_aspancount = plefttop[0] - prighttop[0];
-        d_ptex = (byte *)r_affinetridesc.pskin + (plefttop[2] >> 16) * TEX_BYTES +
-                 (plefttop[3] >> 16) * r_affinetridesc.skinwidth;
-        d_sfrac = 0;
-        d_tfrac = 0;
-        d_light = plefttop[4];
-        d_zi = plefttop[5];
 
-        d_pdest = (byte *)d_viewbuffer + d_scantable[ystart] + plefttop[0] * VID_BYTES;
-        d_pz = d_pzbuffer + ystart * d_zwidth + plefttop[0];
-
-        if (height == 1) {
-            d_pedgespanpackage->pdest = d_pdest;
-            d_pedgespanpackage->pz = d_pz;
-            d_pedgespanpackage->count = d_aspancount;
-            d_pedgespanpackage->ptex = d_ptex;
-
-            d_pedgespanpackage->sfrac = d_sfrac;
-            d_pedgespanpackage->tfrac = d_tfrac;
-
-            // FIXME: need to clamp l, s, t, at both ends?
-            d_pedgespanpackage->light = d_light;
-            d_pedgespanpackage->zi = d_zi;
-
-            d_pedgespanpackage++;
-        } else {
-            R_PolysetSetUpForLineScan(plefttop[0], plefttop[1],
-                                      pleftbottom[0], pleftbottom[1]);
-
-            d_pdestbasestep = r_screenrowbytes + ubasestep * VID_BYTES;
-            d_pdestextrastep = d_pdestbasestep + 1 * VID_BYTES;
-
-#if USE_ASM
-            if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-                d_pzbasestep = (d_zwidth + ubasestep) << 1;
-                d_pzextrastep = d_pzbasestep + 2;
-            } else
-#endif
-            {
-                d_pzbasestep = d_zwidth + ubasestep;
-                d_pzextrastep = d_pzbasestep + 1;
-            }
-
-            if (ubasestep < 0)
-                working_lstepx = r_lstepx - 1;
-            else
-                working_lstepx = r_lstepx;
-
-            d_countextrastep = ubasestep + 1;
-            d_ptexbasestep = ((r_sstepy + r_sstepx * ubasestep) >> 16) * TEX_BYTES +
-                             ((r_tstepy + r_tstepx * ubasestep) >> 16) *
-                             r_affinetridesc.skinwidth;
-#if USE_ASM
-            if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-                d_sfracbasestep = (r_sstepy + r_sstepx * ubasestep) << 16;
-                d_tfracbasestep = (r_tstepy + r_tstepx * ubasestep) << 16;
-            } else
-#endif
-            {
-                d_sfracbasestep = (r_sstepy + r_sstepx * ubasestep) & 0xFFFF;
-                d_tfracbasestep = (r_tstepy + r_tstepx * ubasestep) & 0xFFFF;
-            }
-            d_lightbasestep = r_lstepy + working_lstepx * ubasestep;
-            d_zibasestep = r_zistepy + r_zistepx * ubasestep;
-
-            d_ptexextrastep = ((r_sstepy + r_sstepx * d_countextrastep) >> 16) * TEX_BYTES +
-                              ((r_tstepy + r_tstepx * d_countextrastep) >> 16) *
-                              r_affinetridesc.skinwidth;
-#if USE_ASM
-            if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-                d_sfracextrastep = ((r_sstepy + r_sstepx * d_countextrastep) & 0xFFFF) << 16;
-                d_tfracextrastep = ((r_tstepy + r_tstepx * d_countextrastep) & 0xFFFF) << 16;
-            } else
-#endif
-            {
-                d_sfracextrastep = (r_sstepy + r_sstepx * d_countextrastep) & 0xFFFF;
-                d_tfracextrastep = (r_tstepy + r_tstepx * d_countextrastep) & 0xFFFF;
-            }
-            d_lightextrastep = d_lightbasestep + working_lstepx;
-            d_ziextrastep = d_zibasestep + r_zistepx;
-
-#if USE_ASM
-            if (d_pdrawspans == R_PolysetDrawSpans8_Opaque) {
-                R_PolysetScanLeftEdge(height);
-            } else
-#endif
-            {
-                R_PolysetScanLeftEdge_C(height);
-            }
-        }
+        R_PolysetSetUpAndScanLeftEdge(plefttop, pleftbottom);
     }
 
 // scan out the top (and possibly only) part of the right edge, updating the
@@ -831,8 +669,7 @@ void R_RasterizeAliasPolySmooth(void)
                                   prightbottom[0], prightbottom[1]);
 
         d_countextrastep = ubasestep + 1;
-        a_spans[initialrightheight + height].count = -999999;
-        // mark end of the spanpackages
+        a_spans[initialrightheight + height].count = -999999; // mark end of the spanpackages
         (*d_pdrawspans)(pstart);
     }
 }
@@ -843,12 +680,12 @@ void R_RasterizeAliasPolySmooth(void)
 R_PolysetSetEdgeTable
 ================
 */
-void R_PolysetSetEdgeTable(void)
+static void R_PolysetSetEdgeTable(void)
 {
     int         edgetableindex;
 
     edgetableindex = 0; // assume the vertices are already in
-    //  top to bottom order
+                        // top to bottom order
 
 //
 // determine which edges are right & left, and the order in which

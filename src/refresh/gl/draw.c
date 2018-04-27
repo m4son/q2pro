@@ -27,7 +27,7 @@ static inline void _GL_StretchPic(
 {
     vec_t *dst_vert;
     uint32_t *dst_color;
-    int *dst_indices;
+    QGL_INDEX_TYPE *dst_indices;
 
     if (tess.numverts + 4 > TESS_MAX_VERTICES ||
         tess.numindices + 6 > TESS_MAX_INDICES ||
@@ -64,8 +64,6 @@ static inline void _GL_StretchPic(
             tess.flags |= 2;
         }
     }
-
-#define U32_ALPHA   MakeColor(0, 0, 0, 255)
 
     if ((color & U32_ALPHA) != U32_ALPHA) {
         tess.flags |= 2;
@@ -109,85 +107,77 @@ void R_SetColor(uint32_t color)
     draw.colors[1].u8[3] = draw.colors[0].u8[3];
 }
 
-void R_SetClipRect(int flags, const clipRect_t *clip)
+void R_SetClipRect(const clipRect_t *clip)
 {
     clipRect_t rc;
     float scale;
 
-    if ((draw.flags & DRAW_CLIP_MASK) == flags) {
-        return;
-    }
-
     GL_Flush2D();
 
-    if (flags == DRAW_CLIP_DISABLED) {
-        qglDisable(GL_SCISSOR_TEST);
-        draw.flags &= ~DRAW_CLIP_MASK;
+    if (!clip) {
+clear:
+        if (draw.scissor) {
+            qglDisable(GL_SCISSOR_TEST);
+            draw.scissor = qfalse;
+        }
         return;
     }
 
     scale = 1 / draw.scale;
 
-    rc.left = 0;
-    rc.top = 0;
-    if (flags & DRAW_CLIP_LEFT) {
-        rc.left = clip->left * scale;
-        if (rc.left < 0) {
-            rc.left = 0;
-        }
-    }
-    if (flags & DRAW_CLIP_TOP) {
-        rc.top = clip->top * scale;
-        if (rc.top < 0) {
-            rc.top = 0;
-        }
-    }
+    rc.left = clip->left * scale;
+    rc.top = clip->top * scale;
+    rc.right = clip->right * scale;
+    rc.bottom = clip->bottom * scale;
 
-    rc.right = r_config.width;
-    rc.bottom = r_config.height;
-    if (flags & DRAW_CLIP_RIGHT) {
-        rc.right = clip->right * scale;
-        if (rc.right > r_config.width) {
-            rc.right = r_config.width;
-        }
-    }
-    if (flags & DRAW_CLIP_BOTTOM) {
-        rc.bottom = clip->bottom * scale;
-        if (rc.bottom > r_config.height) {
-            rc.bottom = r_config.height;
-        }
-    }
-
-    if (rc.right < rc.left) {
-        rc.right = rc.left;
-    }
-    if (rc.bottom < rc.top) {
-        rc.bottom = rc.top;
-    }
+    if (rc.left < 0)
+        rc.left = 0;
+    if (rc.top < 0)
+        rc.top = 0;
+    if (rc.right > r_config.width)
+        rc.right = r_config.width;
+    if (rc.bottom > r_config.height)
+        rc.bottom = r_config.height;
+    if (rc.right < rc.left)
+        goto clear;
+    if (rc.bottom < rc.top)
+        goto clear;
 
     qglEnable(GL_SCISSOR_TEST);
     qglScissor(rc.left, r_config.height - rc.bottom,
                rc.right - rc.left, rc.bottom - rc.top);
-    draw.flags = (draw.flags & ~DRAW_CLIP_MASK) | flags;
+    draw.scissor = qtrue;
 }
 
-void R_SetScale(float *scale)
+float R_ClampScale(cvar_t *var)
 {
-    float f = scale ? *scale : 1;
+    if (!var)
+        return 1.0f;
 
-    if (draw.scale == f) {
+    if (var->value)
+        return 1.0f / Cvar_ClampValue(var, 1.0f, 10.0f);
+
+    if (r_config.width * r_config.height >= 2560 * 1440)
+        return 0.25f;
+
+    if (r_config.width * r_config.height >= 1280 * 720)
+        return 0.5f;
+
+    return 1.0f;
+}
+
+void R_SetScale(float scale)
+{
+    if (draw.scale == scale) {
         return;
     }
 
     GL_Flush2D();
 
-    qglMatrixMode(GL_PROJECTION);
-    qglLoadIdentity();
+    GL_Ortho(0, Q_rint(r_config.width * scale),
+             Q_rint(r_config.height * scale), 0, -1, 1);
 
-    qglOrtho(0, Q_rint(r_config.width * f),
-             Q_rint(r_config.height * f), 0, -1, 1);
-
-    draw.scale = f;
+    draw.scale = scale;
 }
 
 void R_DrawStretchPic(int x, int y, int w, int h, qhandle_t pic)
@@ -228,7 +218,7 @@ void R_DrawFill32(int x, int y, int w, int h, uint32_t color)
     _GL_StretchPic(x, y, w, h, 0, 0, 1, 1, color, TEXNUM_WHITE, 0);
 }
 
-static inline void draw_char(int x, int y, int c, qboolean alt, image_t *image)
+static inline void draw_char(int x, int y, int flags, int c, image_t *image)
 {
     float s, t;
 
@@ -236,11 +226,17 @@ static inline void draw_char(int x, int y, int c, qboolean alt, image_t *image)
         return;
     }
 
-    c |= alt << 7;
+    if (flags & UI_ALTCOLOR) {
+        c |= 0x80;
+    }
+    if (flags & UI_XORCOLOR) {
+        c ^= 0x80;
+    }
+
     s = (c & 15) * 0.0625f;
     t = (c >> 4) * 0.0625f;
 
-    if (gl_fontshadow->integer > 0) {
+    if (gl_fontshadow->integer > 0 && c != 0x83) {
         uint32_t black = MakeColor(0, 0, 0, draw.colors[0].u8[3]);
 
         GL_StretchPic(x + 1, y + 1, CHAR_WIDTH, CHAR_HEIGHT, s, t,
@@ -252,23 +248,21 @@ static inline void draw_char(int x, int y, int c, qboolean alt, image_t *image)
     }
 
     GL_StretchPic(x, y, CHAR_WIDTH, CHAR_HEIGHT, s, t,
-                  s + 0.0625f, t + 0.0625f, draw.colors[alt].u32, image);
+                  s + 0.0625f, t + 0.0625f, draw.colors[c >> 7].u32, image);
 }
 
 void R_DrawChar(int x, int y, int flags, int c, qhandle_t font)
 {
-    qboolean alt = (flags & UI_ALTCOLOR) ? qtrue : qfalse;
-    draw_char(x, y, c & 255, alt, IMG_ForHandle(font));
+    draw_char(x, y, flags, c & 255, IMG_ForHandle(font));
 }
 
 int R_DrawString(int x, int y, int flags, size_t maxlen, const char *s, qhandle_t font)
 {
     image_t *image = IMG_ForHandle(font);
-    qboolean alt = (flags & UI_ALTCOLOR) ? qtrue : qfalse;
 
     while (maxlen-- && *s) {
         byte c = *s++;
-        draw_char(x, y, c, alt, image);
+        draw_char(x, y, flags, c, image);
         x += CHAR_WIDTH;
     }
 
@@ -339,9 +333,9 @@ void Draw_Stats(void)
     }
     if (c.batchesDrawn) {
         Draw_Stringf(x, y, "Batches drawn: %i", c.batchesDrawn); y += 10;
-        Draw_Stringf(x, y, "Faces / batch: %i", c.facesDrawn / c.batchesDrawn);
+        Draw_Stringf(x, y, "Faces / batch: %.1f", (float)c.facesDrawn / c.batchesDrawn);
         y += 10;
-        Draw_Stringf(x, y, "Tris / batch : %i", c.trisDrawn / c.batchesDrawn);
+        Draw_Stringf(x, y, "Tris / batch : %.1f", (float)c.facesTris / c.batchesDrawn);
         y += 10;
     }
     Draw_Stringf(x, y, "2D batches   : %i", c.batchesDrawn2D); y += 10;
@@ -355,7 +349,7 @@ void Draw_Lightmaps(void)
         x = i & 1;
         y = i >> 1;
         _GL_StretchPic(256 * x, 256 * y, 256, 256,
-                       0, 0, 1, 1, U32_WHITE, TEXNUM_LIGHTMAP + i, 0);
+                       0, 0, 1, 1, U32_WHITE, lm.texnums[i], 0);
     }
 }
 

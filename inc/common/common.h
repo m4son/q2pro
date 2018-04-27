@@ -36,6 +36,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define COM_DEFAULT_CFG     "default.cfg"
 #define COM_AUTOEXEC_CFG    "autoexec.cfg"
+#define COM_POSTEXEC_CFG    "postexec.cfg"
+#define COM_POSTINIT_CFG    "postinit.cfg"
 
 #ifdef _WIN32
 #define COM_CONFIG_CFG      "q2config.cfg"
@@ -51,6 +53,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define MAXERRORMSG     1024
 
 #define CONST_STR_LEN(x) x, x ? sizeof(x) - 1 : 0
+
+#define __STRINGIFY(x)  #x
+#define STRINGIFY(x)    __STRINGIFY(x)
 
 typedef struct {
     const char *name;
@@ -76,6 +81,8 @@ typedef void (*rdflush_t)(int target, char *buffer, size_t len);
 
 void        Com_BeginRedirect(int target, char *buffer, size_t buffersize, rdflush_t flush);
 void        Com_EndRedirect(void);
+
+void        Com_AbortFunc(void (*func)(void *), void *arg);
 
 #ifdef _WIN32
 void        Com_AbortFrame(void);
@@ -124,10 +131,10 @@ void        Com_AddConfigFile(const char *name, unsigned flags);
     if (developer && developer->integer > 3) \
         Com_LPrintf(PRINT_DEVELOPER, __VA_ARGS__)
 #else
-#define Com_DPrintf(...)
-#define Com_DDPrintf(...)
-#define Com_DDDPrintf(...)
-#define Com_DDDDPrintf(...)
+#define Com_DPrintf(...) ((void)0)
+#define Com_DDPrintf(...) ((void)0)
+#define Com_DDDPrintf(...) ((void)0)
+#define Com_DDDDPrintf(...) ((void)0)
 #endif
 
 extern cvar_t  *z_perturb;

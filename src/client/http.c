@@ -23,13 +23,19 @@ static cvar_t  *cl_http_downloads;
 static cvar_t  *cl_http_filelists;
 static cvar_t  *cl_http_max_connections;
 static cvar_t  *cl_http_proxy;
+static cvar_t  *cl_http_default_url;
+
 #ifdef _DEBUG
 static cvar_t  *cl_http_debug;
 #endif
 
-// size limits for filelists
+#if USE_UI
+static cvar_t  *cl_http_blocking_timeout;
+#endif
+
+// size limits for filelists, must be power of two
 #define MAX_DLSIZE  0x100000    // 1 MiB
-#define MIN_DLSIZE  0x020000    // 128 KiB
+#define MIN_DLSIZE  0x8000      // 32 KiB
 
 typedef struct {
     CURL        *curl;
@@ -40,11 +46,13 @@ typedef struct {
     size_t      position;
     char        url[576];
     char        *buffer;
+    qboolean    multi_added;    //to prevent multiple removes
 } dlhandle_t;
 
 static dlhandle_t   download_handles[4]; //actual download handles, don't raise this!
 static char     download_server[512];    //base url prefix to download from
 static char     download_referer[32];    //libcurl requires a static string :(
+static qboolean download_default_repo;
 
 static qboolean curl_initialized;
 static CURLM    *curl_multi;
@@ -66,21 +74,20 @@ on the HTTP server should ideally be gzipped to conserve
 bandwidth.
 */
 
-// libcurl callback to update progress info. Mainly just used as
-// a way to cancel the transfer if required.
+// libcurl callback to update progress info.
 static int progress_func(void *clientp, double dltotal, double dlnow, double ultotal, double ulnow)
 {
     dlhandle_t *dl = (dlhandle_t *)clientp;
-
-    //dl->position = (unsigned)dlnow;
 
     //don't care which download shows as long as something does :)
     cls.download.current = dl->queue;
 
     if (dltotal)
-        cls.download.percent = (int)((dlnow / dltotal) * 100.0f);
+        cls.download.percent = (int)((dlnow / dltotal) * 100.0);
     else
         cls.download.percent = 0;
+
+    cls.download.position = (int)dlnow;
 
     return 0;
 }
@@ -88,29 +95,27 @@ static int progress_func(void *clientp, double dltotal, double dlnow, double ult
 // libcurl callback for filelists.
 static size_t recv_func(void *ptr, size_t size, size_t nmemb, void *stream)
 {
-    size_t new_size, bytes = size * nmemb;
     dlhandle_t *dl = (dlhandle_t *)stream;
+    size_t new_size, bytes;
 
-    if (!dl->size) {
-        new_size = bytes + 1;
-        if (new_size > MAX_DLSIZE)
-            goto oversize;
-        if (new_size < MIN_DLSIZE)
-            new_size = MIN_DLSIZE;
-        dl->size = new_size;
-        dl->buffer = Z_Malloc(dl->size);
-    } else if (dl->position + bytes >= dl->size) {
-        char *tmp = dl->buffer;
+    if (!nmemb)
+        return 0;
 
-        new_size = dl->size * 2;
-        if (new_size > MAX_DLSIZE)
-            new_size = MAX_DLSIZE;
-        if (dl->position + bytes >= new_size)
-            goto oversize;
-        dl->buffer = Z_Malloc(new_size);
-        memcpy(dl->buffer, tmp, dl->size);
-        Z_Free(tmp);
+    if (size > SIZE_MAX / nmemb)
+        goto oversize;
+
+    if (dl->position > MAX_DLSIZE)
+        goto oversize;
+
+    bytes = size * nmemb;
+    if (bytes >= MAX_DLSIZE - dl->position)
+        goto oversize;
+
+    // grow buffer in MIN_DLSIZE chunks. +1 for NUL.
+    new_size = ALIGN(dl->position + bytes + 1, MIN_DLSIZE);
+    if (new_size > dl->size) {
         dl->size = new_size;
+        dl->buffer = Z_Realloc(dl->buffer, new_size);
     }
 
     memcpy(dl->buffer + dl->position, ptr, bytes);
@@ -124,41 +129,8 @@ oversize:
     return 0;
 }
 
-// libcurl callback to update header info.
-static size_t header_func(void *ptr, size_t size, size_t nmemb, void *stream)
-{
-    size_t len, bytes = size * nmemb;
-    dlhandle_t *dl = (dlhandle_t *)stream;
-    char buffer[64];
-
-    if (dl->size)
-        return bytes;
-
-    if (bytes <= 16)
-        return bytes;
-
-    if (bytes > sizeof(buffer) - 1)
-        bytes = sizeof(buffer) - 1;
-
-    memcpy(buffer, ptr, bytes);
-    buffer[bytes] = 0;
-
-    if (!Q_strncasecmp(buffer, "Content-Length: ", 16)) {
-        //allocate buffer based on what the server claims content-length is. +1 for nul
-        len = strtoul(buffer + 16, NULL, 10);
-        if (len >= MAX_DLSIZE) {
-            Com_DPrintf("[HTTP] Oversize file while trying to download '%s'\n", dl->url);
-            return 0;
-        }
-        dl->size = len + 1;
-        dl->buffer = Z_Malloc(dl->size);
-    }
-
-    return bytes;
-}
-
 #ifdef _DEBUG
-static int debug_func(CURL *c, curl_infotype type, char *data, size_t size, void * ptr)
+static int debug_func(CURL *c, curl_infotype type, char *data, size_t size, void *ptr)
 {
     char buffer[MAXPRINTMSG];
 
@@ -316,13 +288,9 @@ static void start_download(dlqueue_t *entry, dlhandle_t *dl)
     if (dl->file) {
         curl_easy_setopt(dl->curl, CURLOPT_WRITEDATA, dl->file);
         curl_easy_setopt(dl->curl, CURLOPT_WRITEFUNCTION, NULL);
-        curl_easy_setopt(dl->curl, CURLOPT_WRITEHEADER, NULL);
-        curl_easy_setopt(dl->curl, CURLOPT_HEADERFUNCTION, NULL);
     } else {
         curl_easy_setopt(dl->curl, CURLOPT_WRITEDATA, dl);
         curl_easy_setopt(dl->curl, CURLOPT_WRITEFUNCTION, recv_func);
-        curl_easy_setopt(dl->curl, CURLOPT_WRITEHEADER, dl);
-        curl_easy_setopt(dl->curl, CURLOPT_HEADERFUNCTION, header_func);
     }
     curl_easy_setopt(dl->curl, CURLOPT_FAILONERROR, 1);
     curl_easy_setopt(dl->curl, CURLOPT_PROXY, cl_http_proxy->string);
@@ -348,6 +316,7 @@ fail:
 
     Com_DPrintf("[HTTP] Fetching %s...\n", dl->url);
     entry->state = DL_RUNNING;
+    dl->multi_added = qtrue;
     curl_handles++;
 }
 
@@ -379,12 +348,11 @@ ssize_t HTTP_FetchFile(const char *url, void **data) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &tmp);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, recv_func);
-    curl_easy_setopt(curl, CURLOPT_WRITEHEADER, &tmp);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_func);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1);
     curl_easy_setopt(curl, CURLOPT_PROXY, cl_http_proxy->string);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, com_version->string);
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, cl_http_blocking_timeout->integer);
 
     ret = curl_easy_perform(curl);
 
@@ -422,6 +390,8 @@ void HTTP_CleanupDownloads(void)
 
     download_server[0] = 0;
     download_referer[0] = 0;
+    download_default_repo = qfalse;
+
     curl_handles = 0;
 
     for (i = 0; i < 4; i++) {
@@ -439,13 +409,14 @@ void HTTP_CleanupDownloads(void)
         }
 
         if (dl->curl) {
-            if (curl_multi)
+            if (curl_multi && dl->multi_added)
                 curl_multi_remove_handle(curl_multi, dl->curl);
             curl_easy_cleanup(dl->curl);
             dl->curl = NULL;
         }
 
         dl->queue = NULL;
+        dl->multi_added = qfalse;
     }
 
     if (curl_multi) {
@@ -469,8 +440,14 @@ void HTTP_Init(void)
     cl_http_max_connections = Cvar_Get("cl_http_max_connections", "2", 0);
     //cl_http_max_connections->changed = _cl_http_max_connections_changed;
     cl_http_proxy = Cvar_Get("cl_http_proxy", "", 0);
+    cl_http_default_url = Cvar_Get("cl_http_default_url", "", 0);
+
 #ifdef _DEBUG
     cl_http_debug = Cvar_Get("cl_http_debug", "0", 0);
+#endif
+
+#if USE_UI
+    cl_http_blocking_timeout = Cvar_Get("cl_http_blocking_timeout", "15", 0);
 #endif
 
     curl_global_init(CURL_GLOBAL_NOTHING);
@@ -504,11 +481,28 @@ void HTTP_SetServer(const char *url)
         return;
     }
 
-    if (!*url)
+    // ignore on the local server
+    if (NET_IsLocalAddress(&cls.serverAddress))
         return;
 
     // ignore if downloads are permanently disabled
     if (allow_download->integer == -1)
+        return;
+
+    // ignore if HTTP downloads are disabled
+    if (cl_http_downloads->integer == 0)
+        return;
+
+    // use default URL for servers that don't specify one. treat 404 from
+    // default repository as fatal error and revert to UDP downloading.
+    if (!url) {
+        url = cl_http_default_url->string;
+        download_default_repo = qtrue;
+    } else {
+        download_default_repo = qfalse;
+    }
+
+    if (!*url)
         return;
 
     if (strncmp(url, "http://", 7)) {
@@ -541,16 +535,15 @@ qerror_t HTTP_QueueDownload(const char *path, dltype_t type)
     qerror_t    ret;
 
     // no http server (or we got booted)
-    if (!curl_multi || !cl_http_downloads->integer)
+    if (!curl_multi)
         return Q_ERR_NOSYS;
 
     // first download queued, so we want the mod filelist
     need_list = LIST_EMPTY(&cls.download.queue);
 
     ret = CL_QueueDownload(path, type);
-    if (ret) {
+    if (ret)
         return ret;
-    }
 
     if (!cl_http_filelists->integer)
         return Q_ERR_SUCCESS;
@@ -565,7 +558,8 @@ qerror_t HTTP_QueueDownload(const char *path, dltype_t type)
         //get confused by a ton of people stuck in CNCT state. it's assumed the server
         //is running r1q2 if we're even able to do http downloading so hopefully this
         //won't spew an error msg.
-        CL_ClientCommand("download http\n");
+        if (!download_default_repo)
+            CL_ClientCommand("download http\n");
     }
 
     //special case for map file lists, i really wanted a server-push mechanism for this, but oh well
@@ -664,22 +658,25 @@ static void parse_file_list(dlhandle_t *dl)
     char    *list;
     char    *p;
 
+    if (!dl->buffer)
+        return;
+
     if (cl_http_filelists->integer) {
         list = dl->buffer;
-        while (1) {
+        while (*list) {
             p = strchr(list, '\n');
             if (p) {
                 if (p > list && *(p - 1) == '\r')
                     *(p - 1) = 0;
                 *p = 0;
-                if (*list)
-                    check_and_queue_download(list);
-                list = p + 1;
-            } else {
-                if (*list)
-                    check_and_queue_download(list);
-                break;
             }
+
+            if (*list)
+                check_and_queue_download(list);
+
+            if (!p)
+                break;
+            list = p + 1;
         }
     }
 
@@ -709,6 +706,7 @@ static void abort_downloads(void)
 
     cls.download.current = NULL;
     cls.download.percent = 0;
+    cls.download.position = 0;
 
     FOR_EACH_DLQ(q) {
         if (q->state != DL_DONE && q->type >= DL_LIST)
@@ -768,6 +766,7 @@ static qboolean finish_download(void)
 
         cls.download.current = NULL;
         cls.download.percent = 0;
+        cls.download.position = 0;
 
         //filelist processing is done on read
         if (dl->file) {
@@ -791,8 +790,8 @@ static qboolean finish_download(void)
 
             err = http_strerror(response);
 
-            //404 is non-fatal
-            if (response == 404) {
+            //404 is non-fatal unless accessing default repository
+            if (response == 404 && (!download_default_repo || !dl->path[0])) {
                 level = PRINT_ALL;
                 goto fail1;
             }
@@ -833,7 +832,11 @@ fail2:
                 Z_Free(dl->buffer);
                 dl->buffer = NULL;
             }
-            curl_multi_remove_handle(curl_multi, curl);
+            if (dl->multi_added) {
+                //remove the handle and mark it as such
+                curl_multi_remove_handle(curl_multi, curl);
+                dl->multi_added = qfalse;
+            }
             continue;
         }
 
@@ -848,12 +851,11 @@ fail2:
         Com_FormatSizeLong(size, sizeof(size), bytes);
         Com_FormatSizeLong(speed, sizeof(speed), bytes / sec);
 
-        //FIXME:
-        //technically i shouldn't need to do this as curl will auto reuse the
-        //existing handle when you change the url. however, the curl_handles goes
-        //all weird when reusing a download slot in this way. if you can figure
-        //out why, please let me know.
-        curl_multi_remove_handle(curl_multi, curl);
+        if (dl->multi_added) {
+            //remove the handle and mark it as such
+            curl_multi_remove_handle(curl_multi, curl);
+            dl->multi_added = qfalse;
+        }
 
         Com_Printf("[HTTP] %s [%s, %s/sec] [%d remaining file%s]\n",
                    dl->queue->path, size, speed, cls.download.pending,
